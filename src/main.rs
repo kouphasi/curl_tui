@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use curl_tui::{
     app::{Action, App},
-    collection, http,
+    collection, curl, http,
     model::Response,
 };
 
@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
     };
     let requests = collection::load(&path)?;
     let mut app = App::new(requests);
+    app.curl_shell = curl::Shell::detect();
 
     // ratatui::init は raw mode / 代替画面 / パニック時の復元フックを設定する
     let mut terminal = ratatui::init();

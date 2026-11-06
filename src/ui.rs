@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::app::{App, Focus, Mode, RequestTab, ResponseState, ResponseTab, SPINNER};
+use crate::curl;
 use crate::editor::TextEditor;
 use crate::model::{HttpMethod, format_size};
 
@@ -114,7 +115,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("h/l,m", "メソッド"),
             ("Ctrl+R", "送信"),
         ],
-        (_, Focus::Request) => &[("i/Enter", "編集"), ("h/l,1-4", "タブ"), ("Ctrl+R", "送信")],
+        (_, Focus::Request) => &[
+            ("i/Enter", "編集"),
+            ("h/l,1-4", "タブ"),
+            ("s", "cURLのシェル"),
+            ("Ctrl+R", "送信"),
+        ],
         (_, Focus::Response) => &[("j/k", "スクロール"), ("g/G", "先頭/末尾"), ("h/l", "タブ")],
     };
     let mut spans = Vec::new();
@@ -227,12 +233,22 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
             "リクエストボディ",
         ),
         RequestTab::Curl => {
-            let curl = app.current_request().to_curl();
+            let [shell_area, cmd_area] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(body_area);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw("Shell: "),
+                    Span::raw(app.curl_shell.label()).bold().fg(Color::Yellow),
+                    Span::raw("  (s で切り替え)").fg(Color::DarkGray),
+                ])),
+                shell_area,
+            );
+            let curl = curl::to_curl(&app.current_request(), app.curl_shell);
             frame.render_widget(
                 Paragraph::new(curl)
                     .fg(Color::Cyan)
                     .wrap(Wrap { trim: false }),
-                body_area,
+                cmd_area,
             );
         }
     }
@@ -374,6 +390,7 @@ fn draw_help(frame: &mut Frame) {
         ("i / Enter", "フォーカス中の欄を編集"),
         ("Esc", "編集を終了"),
         ("h / l, 1-4", "タブ切り替え"),
+        ("s (cURL タブ)", "シェル切り替え"),
         ("j / k", "選択・スクロール"),
         ("n / y / d / r", "新規 / 複製 / 削除 / 名前変更"),
         ("Ctrl+A/E/K/U", "行頭 / 行末 / 行末まで削除 / 全消去"),
@@ -488,6 +505,9 @@ mod tests {
         assert!(screen.contains("接続エラー"));
         assert!(screen.contains("curl"));
         assert!(screen.contains("'https://httpbin.org/get'"));
+        assert!(screen.contains("bash / zsh / sh"));
+        app.curl_shell = crate::curl::Shell::PowerShell;
+        assert!(render(&app).contains("curl.exe"));
     }
 
     #[test]

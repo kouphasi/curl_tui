@@ -5,6 +5,7 @@
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::curl::Shell;
 use crate::editor::TextEditor;
 use crate::model::{self, HttpMethod, Request, Response};
 
@@ -135,6 +136,8 @@ pub struct App {
     pub focus: Focus,
     pub mode: Mode,
     pub request_tab: RequestTab,
+    /// cURL タブで出力するシェルの種類
+    pub curl_shell: Shell,
     pub response_tab: ResponseTab,
     pub response: ResponseState,
     pub response_scroll: u16,
@@ -159,6 +162,7 @@ impl App {
             focus: Focus::Url,
             mode: Mode::Normal,
             request_tab: RequestTab::Params,
+            curl_shell: Shell::Posix,
             response_tab: ResponseTab::Body,
             response: ResponseState::Empty,
             response_scroll: 0,
@@ -438,6 +442,10 @@ impl App {
             KeyCode::Char(c @ '1'..='4') => {
                 self.request_tab = RequestTab::ALL[(c as u8 - b'1') as usize];
             }
+            KeyCode::Char('s') if self.request_tab == RequestTab::Curl => {
+                self.curl_shell = self.curl_shell.next();
+                self.status = format!("cURL の出力先: {}", self.curl_shell.label());
+            }
             _ => {}
         }
     }
@@ -652,6 +660,20 @@ mod tests {
         assert_eq!(app.request_tab, RequestTab::Curl);
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn s_cycles_curl_shell_only_on_curl_tab() {
+        let mut app = App::new(vec![]);
+        app.focus = Focus::Request;
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.curl_shell, Shell::Posix);
+        app.handle_key(key(KeyCode::Char('4')));
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.curl_shell, Shell::Fish);
+        app.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(app.curl_shell, Shell::PowerShell);
+        assert!(app.status.contains("PowerShell"));
     }
 
     #[test]

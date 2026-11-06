@@ -146,38 +146,6 @@ impl Request {
         }
         Ok(url)
     }
-
-    /// 同等の curl コマンドを生成する。
-    pub fn to_curl(&self) -> String {
-        let url = self
-            .full_url()
-            .map(|u| u.to_string())
-            .unwrap_or_else(|_| self.url.clone());
-        let mut parts = vec!["curl".to_string()];
-        if self.method != HttpMethod::Get {
-            parts.push(format!("-X {}", self.method));
-        }
-        parts.push(shell_quote(&url));
-        for h in self
-            .headers
-            .iter()
-            .filter(|h| h.enabled && !h.key.is_empty())
-        {
-            parts.push(format!(
-                "-H {}",
-                shell_quote(&format!("{}: {}", h.key, h.value))
-            ));
-        }
-        if !self.body.is_empty() {
-            parts.push(format!("--data-raw {}", shell_quote(&self.body)));
-        }
-        parts.join(" \\\n  ")
-    }
-}
-
-/// POSIX シェル用のシングルクォート。
-pub fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// `Key: Value` 形式のテキストをヘッダ一覧に変換する。`#` 始まりの行は無効扱い。
@@ -368,34 +336,6 @@ mod tests {
             ..Default::default()
         };
         assert!(bad.full_url().is_err());
-    }
-
-    #[test]
-    fn to_curl_for_get_is_minimal() {
-        let req = Request {
-            url: "https://example.com".into(),
-            ..Default::default()
-        };
-        assert_eq!(req.to_curl(), "curl \\\n  'https://example.com/'");
-    }
-
-    #[test]
-    fn to_curl_includes_method_headers_and_escaped_body() {
-        let req = Request {
-            method: HttpMethod::Post,
-            url: "https://example.com/api".into(),
-            headers: vec![
-                KeyValue::new("Content-Type", "application/json"),
-                KeyValue::disabled("X-Off", "1"),
-            ],
-            body: r#"{"msg":"it's"}"#.into(),
-            ..Default::default()
-        };
-        let curl = req.to_curl();
-        assert!(curl.starts_with("curl \\\n  -X POST"));
-        assert!(curl.contains("-H 'Content-Type: application/json'"));
-        assert!(!curl.contains("X-Off"));
-        assert!(curl.contains(r#"--data-raw '{"msg":"it'\''s"}'"#));
     }
 
     #[test]
