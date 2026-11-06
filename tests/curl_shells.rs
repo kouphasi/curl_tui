@@ -7,7 +7,7 @@
 use std::{os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 use curl_tui::{
-    curl::{self, Shell},
+    curl,
     model::{HttpMethod, KeyValue, Request},
 };
 
@@ -27,7 +27,7 @@ fn tricky_requests() -> Vec<Request> {
                 "\n",
                 r#""vars":"$HOME ${X} `cmd` $(cmd) %PATH% !!","glob":"*?[a]~","semi":"a;b|c&d>e<f","#,
                 "\n",
-                r#""fish":"\\' \n \t","jp":"日本語 ‘曲がった’ “引用”","end":"\"}"#,
+                r#""esc":"\\' \n \t","jp":"日本語 ‘曲がった’ “引用”","end":"\"}"#,
                 "\\"
             )
             .into(),
@@ -91,7 +91,7 @@ fn run_in_shell(shell_bin: &str, command: &str, bin_dir: &Path) -> Vec<String> {
         .collect()
 }
 
-fn check(shell: Shell, shell_bins: &[&str]) {
+fn check(shell_bins: &[&str]) {
     let dir = tempfile::tempdir().unwrap();
     write_fake_curl(dir.path());
     let mut ran = false;
@@ -102,38 +102,17 @@ fn check(shell: Shell, shell_bins: &[&str]) {
         }
         ran = true;
         for req in tricky_requests() {
-            let command = curl::to_curl(&req, shell);
+            let command = curl::to_curl(&req);
             let got = run_in_shell(bin, &command, dir.path());
             assert_eq!(got, curl::args(&req), "{bin} で引数が変わった:\n{command}");
         }
     }
     if !ran {
-        eprintln!("skip: {shell:?} 用のシェルが 1 つも見つかりません");
+        eprintln!("skip: 対象のシェルが 1 つも見つかりません");
     }
 }
 
 #[test]
 fn posix_shells_receive_exact_arguments() {
-    check(Shell::Posix, &["bash", "sh", "dash", "zsh"]);
-}
-
-#[test]
-fn fish_receives_exact_arguments() {
-    check(Shell::Fish, &["fish"]);
-}
-
-/// fish 用の出力を bash で実行するとバックスラッシュが二重になる (= 区別が必要な証拠)。
-#[test]
-fn posix_and_fish_quoting_really_differ() {
-    if !installed("bash") {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    write_fake_curl(dir.path());
-    let req = Request {
-        body: r"C:\dir".into(),
-        ..Default::default()
-    };
-    let got = run_in_shell("bash", &curl::to_curl(&req, Shell::Fish), dir.path());
-    assert_eq!(got.last().unwrap(), r"C:\\dir");
+    check(&["bash", "sh", "dash", "zsh"]);
 }
