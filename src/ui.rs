@@ -123,8 +123,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .chain([("Tab", "移動"), ("?", "ヘルプ"), ("q", "終了")].iter())
     {
-        spans.push(Span::raw(format!(" {k} ")).black().on_dark_gray());
-        spans.push(Span::raw(format!(" {desc}  ")));
+        // 背景色に依存せず、どのテーマでも読みやすいよう前景色のみで強調する
+        spans.push(Span::raw(format!(" {k}")).fg(Color::Cyan).bold());
+        spans.push(Span::raw(format!(" {desc}  ")).fg(Color::Gray));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
