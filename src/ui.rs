@@ -8,7 +8,7 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
 
-use crate::app::{App, Focus, Mode, RequestTab, ResponseState, ResponseTab, SPINNER};
+use crate::app::{App, Focus, Mode, PreviewState, RequestTab, ResponseState, ResponseTab, SPINNER};
 use crate::curl;
 use crate::editor::TextEditor;
 use crate::model::{HttpMethod, format_size};
@@ -51,6 +51,7 @@ fn block<'a>(app: &App, focus: Focus, title: impl Into<Line<'a>>) -> Block<'a> {
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
+    app.preview_area.set(None);
     let [header, main, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -79,6 +80,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Mode::Help => draw_help(frame),
         Mode::Rename => draw_rename(frame, app),
         _ => {}
+    }
+    // 画像は文字より手前に描かれるため、ポップアップ表示中は画像を隠す
+    if matches!(app.mode, Mode::Help | Mode::Rename) {
+        app.preview_area.set(None);
     }
 }
 
@@ -372,15 +377,25 @@ fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
             let [tab_area, body_area] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
             app.response_height.set(body_area.height);
-            let tabs = Tabs::new(vec![
-                Line::from("Body"),
-                Line::from(format!("Headers ({})", r.headers.len())),
-            ])
-            .select(app.response_tab.index())
-            .highlight_style(Style::new().fg(Color::Yellow).bold().underlined())
-            .divider("│");
+            let titles: Vec<Line> = app
+                .response_tabs()
+                .iter()
+                .map(|t| match t {
+                    ResponseTab::Body => Line::from("Body"),
+                    ResponseTab::Headers => Line::from(format!("Headers ({})", r.headers.len())),
+                    ResponseTab::Preview => Line::from("Preview"),
+                })
+                .collect();
+            let tabs = Tabs::new(titles)
+                .select(app.response_tab.index())
+                .highlight_style(Style::new().fg(Color::Yellow).bold().underlined())
+                .divider("│");
             frame.render_widget(tabs, tab_area);
 
+            if app.response_tab == ResponseTab::Preview {
+                draw_preview(frame, app, body_area);
+                return;
+            }
             let text: Text = match app.response_tab {
                 ResponseTab::Body => Text::from(r.body.as_str()),
                 ResponseTab::Headers => Text::from(
@@ -395,6 +410,7 @@ fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
                         })
                         .collect::<Vec<_>>(),
                 ),
+                ResponseTab::Preview => unreachable!(),
             };
             frame.render_widget(
                 Paragraph::new(text)
@@ -404,6 +420,35 @@ fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
             );
         }
     }
+}
+
+/// Preview タブ。画像そのものは main が kitty graphics protocol で上に重ねる。
+fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
+    if let Some(reason) = &app.preview_unavailable {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(format!("プレビューを表示できません: {reason}")).fg(Color::Yellow),
+                Line::from("HTML のソースは Body タブで確認できます").fg(Color::DarkGray),
+            ])
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    // 描画済みでも幅が変われば main が描き直すので、領域は常に知らせる
+    app.preview_area.set(Some(area));
+    let msg = match &app.preview {
+        PreviewState::Ready { .. } => return,
+        PreviewState::Idle | PreviewState::Rendering => {
+            Paragraph::new(format!("{} ブラウザで描画中…", SPINNER[app.spinner]))
+                .fg(Color::Yellow)
+                .centered()
+        }
+        PreviewState::Failed(e) => Paragraph::new(e.as_str())
+            .fg(Color::Red)
+            .wrap(Wrap { trim: false }),
+    };
+    frame.render_widget(msg, area);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -431,6 +476,7 @@ fn draw_help(frame: &mut Frame) {
         ("d c y + 移動", "dw, cw, d$, dd, cc, yy など"),
         ("p / P / u", "貼り付け / 前に貼り付け / 元に戻す"),
         ("Ctrl+D/U/F/B", "レスポンスのページ送り"),
+        ("3 (Response)", "HTML のプレビュー (kitty 対応端末)"),
         (
             "o / dd / yy / p / r",
             "(Collection) 新規 / 削除 / ヤンク / 貼付 / 名前変更",
@@ -533,6 +579,7 @@ mod tests {
             headers: vec![("x-custom".into(), "yes".into())],
             body: "{\n  \"id\": 7\n}".into(),
             size: 2048,
+            ..Default::default()
         }));
         let screen = render(&app);
         assert!(screen.contains("201 Created"));
@@ -600,6 +647,50 @@ mod tests {
         let screen = render(&app);
         assert!(screen.contains("COMMAND"));
         assert!(screen.lines().last().unwrap().starts_with(":wq"));
+    }
+
+    #[test]
+    fn preview_tab_shows_status_and_reports_area() {
+        let mut app = App::new(vec![]);
+        app.set_response(Ok(Response {
+            status: 200,
+            headers: vec![("content-type".into(), "text/html".into())],
+            body: "<html></html>".into(),
+            ..Default::default()
+        }));
+        let screen = render(&app);
+        assert!(screen.contains("Preview"));
+        assert_eq!(app.preview_area.get(), None);
+
+        app.focus = Focus::Response;
+        app.handle_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char('3'),
+        ));
+        assert!(render(&app).contains("ブラウザで描画中"));
+        assert!(app.preview_area.get().is_some());
+
+        // ヘルプ表示中は画像を出さない
+        app.mode = Mode::Help;
+        render(&app);
+        assert_eq!(app.preview_area.get(), None);
+        app.mode = Mode::Normal;
+
+        app.preview_unavailable = Some("未対応".into());
+        let screen = render(&app);
+        assert!(screen.contains("プレビューを表示できません: 未対応"));
+        assert_eq!(app.preview_area.get(), None);
+    }
+
+    #[test]
+    fn json_response_has_no_preview_tab() {
+        let mut app = App::new(vec![]);
+        app.set_response(Ok(Response {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: "{}".into(),
+            ..Default::default()
+        }));
+        assert!(!render(&app).contains("Preview"));
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub async fn send(client: &reqwest::Client, req: &Request) -> anyhow::Result<Res
     let start = Instant::now();
     let resp = builder.send().await.map_err(describe_error)?;
     let status = resp.status();
+    let final_url = resp.url().to_string();
     let headers: Vec<(String, String)> = resp
         .headers()
         .iter()
@@ -54,6 +55,7 @@ pub async fn send(client: &reqwest::Client, req: &Request) -> anyhow::Result<Res
     let body = format_body(content_type, &String::from_utf8_lossy(&bytes));
 
     Ok(Response {
+        url: final_url,
         status: status.as_u16(),
         status_text: status.canonical_reason().unwrap_or("").to_string(),
         elapsed_ms,
