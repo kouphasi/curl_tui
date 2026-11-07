@@ -16,6 +16,30 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 - コレクション管理 (新規 / 複製 / 削除 / 名前変更) と JSON ファイルへの保存
 - ブラケットペースト対応、日本語などの全角文字の入力に対応
 
+## インストール
+
+[Releases](https://github.com/kouphasi/curl_tui/releases) から OS に合ったファイルをダウンロードして展開し、
+中の `curl_tui` (Windows は `curl_tui.exe`) を PATH の通った場所に置いてください。
+
+| OS | ファイル |
+| --- | --- |
+| Linux (x86_64) | `curl_tui-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux (ARM64) | `curl_tui-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| macOS (Apple Silicon) | `curl_tui-<version>-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `curl_tui-<version>-x86_64-apple-darwin.tar.gz` |
+| Windows (x86_64) | `curl_tui-<version>-x86_64-pc-windows-msvc.zip` |
+
+```sh
+tar xzf curl_tui-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+sudo mv curl_tui-v0.1.0-x86_64-unknown-linux-musl/curl_tui /usr/local/bin/
+```
+
+Linux 版は musl で静的リンクしているので、glibc のバージョンに関係なく動きます。
+macOS でダウンロードしたバイナリが「開発元を検証できない」とブロックされる場合は
+`xattr -d com.apple.quarantine curl_tui` を実行してください。
+
+ソースからビルドする場合は `cargo install --path .` でインストールできます。
+
 ## 使い方
 
 ```sh
@@ -103,3 +127,13 @@ cargo test
 - ユニットテスト: モデル・エディタ・キー操作・保存処理・描画 (`ratatui::backend::TestBackend`)
 - 結合テスト: Tokio で立てたモックサーバへの送信、タイムアウト、接続エラー、キー入力から送信までの流れ
 - シェルテスト: 生成した curl コマンドを bash / sh / dash / zsh で実行し、curl が受け取る引数が一致するか確認 (未インストールのシェルはスキップ)
+
+## リリース手順
+
+`Cargo.toml` の `version` を更新してコミットし、`v` で始まるタグを push すると
+GitHub Actions (`.github/workflows/release.yml`) が各 OS 向けにビルドし、Release にバイナリを添付します。
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
