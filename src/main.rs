@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::Result;
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{DisableBracketedPaste, EnableBracketedPaste, EventStream},
     execute,
 };
@@ -13,7 +14,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
 use curl_tui::{
-    app::{Action, App},
+    app::{Action, App, Mode},
     collection, http,
     model::Response,
 };
@@ -36,7 +37,11 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnableBracketedPaste)?;
     let result = run(&mut terminal, &mut app, &path).await;
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        SetCursorStyle::DefaultUserShape
+    );
     ratatui::restore();
     result
 }
@@ -47,7 +52,19 @@ async fn run(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> Resu
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
 
+    let mut cursor_mode = None;
     loop {
+        // Vim と同じく Normal はブロック、Insert 系はバーのカーソルにする
+        let insert_like = matches!(app.mode, Mode::Editing | Mode::Rename | Mode::Command);
+        if cursor_mode != Some(insert_like) {
+            let style = if insert_like {
+                SetCursorStyle::SteadyBar
+            } else {
+                SetCursorStyle::SteadyBlock
+            };
+            execute!(std::io::stdout(), style)?;
+            cursor_mode = Some(insert_like);
+        }
         terminal.draw(|f| curl_tui::ui::draw(f, app))?;
 
         tokio::select! {
@@ -71,6 +88,11 @@ async fn run(terminal: &mut DefaultTerminal, app: &mut App, path: &Path) -> Resu
                             Err(e) => format!("保存に失敗: {e:#}"),
                         };
                     }
+                    Action::SaveAndQuit(reqs) => match collection::save(path, &reqs) {
+                        Ok(()) => break,
+                        // 保存できなければ終了しない
+                        Err(e) => app.status = format!("保存に失敗: {e:#}"),
+                    },
                 }
             }
             Some(res) = rx.recv() => app.set_response(res),
