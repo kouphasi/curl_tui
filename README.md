@@ -30,8 +30,8 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 | Windows (x86_64) | `curl_tui-<version>-x86_64-pc-windows-msvc.zip` |
 
 ```sh
-tar xzf curl_tui-v0.1.0-x86_64-unknown-linux-musl.tar.gz
-sudo mv curl_tui-v0.1.0-x86_64-unknown-linux-musl/curl_tui /usr/local/bin/
+tar xzf curl_tui-v0.1.1-x86_64-unknown-linux-musl.tar.gz
+sudo mv curl_tui-v0.1.1-x86_64-unknown-linux-musl/curl_tui /usr/local/bin/
 ```
 
 Linux 版は musl で静的リンクしているので、glibc のバージョンに関係なく動きます。
@@ -134,6 +134,6 @@ cargo test
 GitHub Actions (`.github/workflows/release.yml`) が各 OS 向けにビルドし、Release にバイナリを添付します。
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
