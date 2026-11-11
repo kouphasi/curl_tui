@@ -8,7 +8,10 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
 
-use crate::app::{App, Focus, Mode, PreviewState, RequestTab, ResponseState, ResponseTab, SPINNER};
+use crate::app::{
+    App, EditorRegion, Focus, Mode, PreviewState, Regions, RequestTab, ResponseState, ResponseTab,
+    SPINNER,
+};
 use crate::curl;
 use crate::editor::TextEditor;
 use crate::model::{HttpMethod, format_size};
@@ -52,6 +55,7 @@ fn block<'a>(app: &App, focus: Focus, title: impl Into<Line<'a>>) -> Block<'a> {
 
 pub fn draw(frame: &mut Frame, app: &App) {
     app.preview_area.set(None);
+    *app.regions.borrow_mut() = Regions::default();
     let [header, main, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -118,7 +122,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         let [colon, input] =
             Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
         frame.render_widget(Paragraph::new(":"), colon);
-        draw_editor(frame, &app.command, Block::new(), input, true, "");
+        let _ = draw_editor(frame, &app.command, Block::new(), input, true, "");
         return;
     }
     let editor_focused = editor_focused(app);
@@ -213,6 +217,10 @@ fn draw_collection(frame: &mut Frame, app: &App, area: Rect) {
         .highlight_symbol("▶ ");
     let mut state = ListState::default().with_selected(Some(app.selected));
     frame.render_stateful_widget(list, area, &mut state);
+    let mut regions = app.regions.borrow_mut();
+    regions.collection = area;
+    regions.collection_list = Block::bordered().inner(area);
+    regions.collection_offset = state.offset();
 }
 
 fn draw_url(frame: &mut Frame, app: &App, area: Rect) {
@@ -229,7 +237,7 @@ fn draw_url(frame: &mut Frame, app: &App, area: Rect) {
 
     let editing = show_cursor(app, Focus::Url);
     let title = format!(" URL  [{}] ", app.collection[app.selected].name);
-    draw_editor(
+    let region = draw_editor(
         frame,
         &app.url,
         block(app, Focus::Url, title),
@@ -237,6 +245,9 @@ fn draw_url(frame: &mut Frame, app: &App, area: Rect) {
         editing,
         "https://...",
     );
+    let mut regions = app.regions.borrow_mut();
+    regions.url = area;
+    regions.url_editor = Some(region);
 }
 
 fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
@@ -244,6 +255,7 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|t| Line::from(t.title()))
         .collect();
+    let tab_widths: Vec<usize> = titles.iter().map(Line::width).collect();
     let tabs = Tabs::new(titles)
         .select(app.request_tab.index())
         .highlight_style(Style::new().fg(Color::Yellow).bold().underlined())
@@ -256,31 +268,31 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(tabs, tab_area);
 
     let editing = show_cursor(app, Focus::Request);
-    match app.request_tab {
-        RequestTab::Params => draw_editor(
+    let editor = match app.request_tab {
+        RequestTab::Params => Some(draw_editor(
             frame,
             &app.params,
             Block::new(),
             body_area,
             editing,
             "key=value  (1 行 1 件 / # で無効化)",
-        ),
-        RequestTab::Headers => draw_editor(
+        )),
+        RequestTab::Headers => Some(draw_editor(
             frame,
             &app.headers,
             Block::new(),
             body_area,
             editing,
             "Header-Name: value  (1 行 1 件 / # で無効化)",
-        ),
-        RequestTab::Body => draw_editor(
+        )),
+        RequestTab::Body => Some(draw_editor(
             frame,
             &app.body,
             Block::new(),
             body_area,
             editing,
             "リクエストボディ",
-        ),
+        )),
         RequestTab::Curl => {
             let curl = curl::to_curl(&app.current_request());
             frame.render_widget(
@@ -289,11 +301,39 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
                     .wrap(Wrap { trim: false }),
                 body_area,
             );
+            None
         }
-    }
+    };
+    let mut regions = app.regions.borrow_mut();
+    regions.request = area;
+    regions.request_tabs = tab_rects(tab_area, &tab_widths);
+    regions.request_editor = editor;
+}
+
+/// `Tabs` が各タイトルを描く位置 (前後の空白 1 つずつを含む)。クリック判定に使う。
+fn tab_rects(area: Rect, widths: &[usize]) -> Vec<Rect> {
+    let mut x = area.x;
+    widths
+        .iter()
+        .map(|w| {
+            // 空白 + タイトル + 空白、その後ろに区切り線 1 つ
+            let width = (*w as u16).saturating_add(2);
+            let start = x.min(area.right());
+            let rect = Rect::new(
+                start,
+                area.y,
+                width.min(area.right() - start),
+                area.height.min(1),
+            );
+            x = x.saturating_add(width).saturating_add(1);
+            rect
+        })
+        .collect()
 }
 
 /// エディタを描画し、編集中ならカーソルを置く。カーソルが見えるようにスクロールする。
+/// 描画した領域とスクロール量を返す。
+#[must_use]
 fn draw_editor(
     frame: &mut Frame,
     editor: &TextEditor,
@@ -301,7 +341,7 @@ fn draw_editor(
     area: Rect,
     editing: bool,
     placeholder: &str,
-) {
+) -> EditorRegion {
     let inner = blk.inner(area);
     let (row, _) = editor.cursor();
     let col = editor.cursor_display_col();
@@ -333,6 +373,11 @@ fn draw_editor(
         let y = inner.y + (row as u16).saturating_sub(scroll_y);
         frame.set_cursor_position((x, y));
     }
+    EditorRegion {
+        area: inner,
+        scroll_x,
+        scroll_y,
+    }
 }
 
 fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
@@ -353,6 +398,7 @@ fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
     let blk = block(app, Focus::Response, Line::from(title));
     let inner = blk.inner(area);
     frame.render_widget(blk, area);
+    app.regions.borrow_mut().response = area;
 
     match &app.response {
         ResponseState::Empty => frame.render_widget(
@@ -386,6 +432,8 @@ fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
                     ResponseTab::Preview => Line::from("Preview"),
                 })
                 .collect();
+            let tab_widths: Vec<usize> = titles.iter().map(Line::width).collect();
+            app.regions.borrow_mut().response_tabs = tab_rects(tab_area, &tab_widths);
             let tabs = Tabs::new(titles)
                 .select(app.response_tab.index())
                 .highlight_style(Style::new().fg(Color::Yellow).bold().underlined())
@@ -486,6 +534,10 @@ fn draw_help(frame: &mut Frame) {
             "Ctrl+A/E/K/U",
             "(Insert) 行頭 / 行末 / 行末まで削除 / 全消去",
         ),
+        (
+            "クリック / ホイール",
+            "ペイン・リクエスト・タブ・カーソル位置の選択 / スクロール",
+        ),
         ("q / Ctrl+C", "終了"),
     ];
     let lines: Vec<Line> = rows
@@ -517,7 +569,7 @@ fn draw_rename(frame: &mut Frame, app: &App) {
         .border_type(BorderType::Thick)
         .border_style(Style::new().fg(Color::Magenta))
         .title(" リクエスト名 ");
-    draw_editor(frame, &app.rename, blk, area, true, "");
+    let _ = draw_editor(frame, &app.rename, blk, area, true, "");
 }
 
 #[cfg(test)]
@@ -691,6 +743,175 @@ mod tests {
             ..Default::default()
         }));
         assert!(!render(&app).contains("Preview"));
+    }
+
+    fn click(app: &mut App, x: u16, y: u16) {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    /// 画面上で `needle` が始まるセルの位置 (ASCII のみの行を想定)。
+    fn find(screen: &str, needle: &str) -> (u16, u16) {
+        for (y, line) in screen.lines().enumerate() {
+            if let Some(i) = line.find(needle) {
+                return (line[..i].chars().count() as u16, y as u16);
+            }
+        }
+        panic!("{needle:?} not found\n{screen}");
+    }
+
+    fn two_requests() -> App {
+        App::new(vec![
+            Request {
+                name: "First".into(),
+                url: "http://one.example/path".into(),
+                body: "line0\nline1\nline2".into(),
+                ..Default::default()
+            },
+            Request {
+                name: "Second".into(),
+                url: "http://two.example".into(),
+                ..Default::default()
+            },
+        ])
+    }
+
+    #[test]
+    fn click_selects_collection_item() {
+        let mut app = two_requests();
+        let screen = render(&app);
+        let (x, y) = find(&screen, "Second");
+        click(&mut app, x, y);
+        assert_eq!(app.focus, Focus::Collection);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.url.text(), "http://two.example");
+        // 項目のない行をクリックしても選択は変わらない
+        render(&app);
+        click(&mut app, x, y + 5);
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn click_selects_pane_and_tab() {
+        let mut app = two_requests();
+        let screen = render(&app);
+        let (x, y) = find(&screen, "Body");
+        click(&mut app, x + 1, y);
+        assert_eq!(app.focus, Focus::Request);
+        assert_eq!(app.request_tab, RequestTab::Body);
+        let (x, y) = find(&render(&app), "cURL");
+        click(&mut app, x, y);
+        assert_eq!(app.request_tab, RequestTab::Curl);
+        let (x, y) = find(&render(&app), "Method");
+        click(&mut app, x, y + 1);
+        assert_eq!(app.focus, Focus::Url);
+
+        app.set_response(Ok(Response {
+            status: 200,
+            headers: vec![("x-a".into(), "1".into())],
+            body: "hello".into(),
+            ..Default::default()
+        }));
+        let (x, y) = find(&render(&app), "Headers (1)");
+        click(&mut app, x, y);
+        assert_eq!(app.focus, Focus::Response);
+        assert_eq!(app.response_tab, ResponseTab::Headers);
+        let (x, y) = find(&render(&app), "x-a");
+        click(&mut app, x, y);
+        assert_eq!(app.response_tab, ResponseTab::Headers);
+    }
+
+    #[test]
+    fn click_places_cursor_in_text_fields() {
+        let mut app = two_requests();
+        let (x, y) = find(&render(&app), "one.example");
+        click(&mut app, x, y);
+        assert_eq!(app.focus, Focus::Url);
+        assert_eq!(app.url.cursor(), (0, "http://".len()));
+        // 行末より右は最後の文字に丸める (Normal モード)
+        click(&mut app, x + 60, y);
+        assert_eq!(app.url.cursor(), (0, "http://one.example/path".len() - 1));
+
+        app.request_tab = RequestTab::Body;
+        let (x, y) = find(&render(&app), "line1");
+        click(&mut app, x + 2, y);
+        assert_eq!(app.focus, Focus::Request);
+        assert_eq!(app.body.cursor(), (1, 2));
+        // 最終行より下は最終行に丸める
+        click(&mut app, x, y + 4);
+        assert_eq!(app.body.cursor(), (2, 0));
+    }
+
+    #[test]
+    fn click_handles_wide_chars_and_insert_mode() {
+        let mut app = App::new(vec![Request {
+            url: "http://a".into(),
+            body: "あいう".into(),
+            ..Default::default()
+        }]);
+        app.request_tab = RequestTab::Body;
+        app.focus = Focus::Request;
+        let region = {
+            render(&app);
+            app.regions.borrow().request_editor.unwrap()
+        };
+        // 全角 2 文字目の右半分をクリック
+        click(&mut app, region.area.x + 3, region.area.y);
+        assert_eq!(app.body.cursor(), (0, 1));
+
+        // Insert 中に同じ欄をクリックすると Insert のまま (行末の 1 つ先にも置ける)
+        app.handle_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char('i'),
+        ));
+        render(&app);
+        click(&mut app, region.area.x + 20, region.area.y);
+        assert_eq!(app.mode, Mode::Editing);
+        assert_eq!(app.body.cursor(), (0, 3));
+        // 別のペインをクリックすると Normal に戻る
+        let (x, y) = find(&render(&app), "http://a");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.focus, Focus::Url);
+    }
+
+    #[test]
+    fn click_closes_help_and_wheel_scrolls_response() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let mut app = two_requests();
+        app.mode = Mode::Help;
+        render(&app);
+        click(&mut app, 1, 3);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.focus, Focus::Url);
+
+        app.set_response(Ok(Response {
+            status: 200,
+            body: "a\nb\nc\nd\ne\nf".into(),
+            ..Default::default()
+        }));
+        render(&app);
+        let area = app.regions.borrow().response;
+        let wheel = |kind, row| MouseEvent {
+            kind,
+            column: area.x + 2,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(wheel(MouseEventKind::ScrollDown, area.y + 3));
+        assert_eq!(app.response_scroll, 3);
+        app.handle_mouse(wheel(MouseEventKind::ScrollDown, area.y + 3));
+        assert_eq!(app.response_scroll, 5);
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp, area.y + 3));
+        assert_eq!(app.response_scroll, 2);
+        // Response の外では何もしない
+        app.handle_mouse(wheel(MouseEventKind::ScrollUp, 2));
+        assert_eq!(app.response_scroll, 2);
+        assert_eq!(app.focus, Focus::Url);
     }
 
     #[test]

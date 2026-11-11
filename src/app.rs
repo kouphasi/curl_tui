@@ -3,10 +3,12 @@
 //! I/O を持たない純粋な状態機械にしておき、テストしやすくしている。
 //! 実際の送信や保存は [`Action`] として呼び出し側 (main) に返す。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::Rect;
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
 
 use crate::editor::TextEditor;
 use crate::model::{self, HttpMethod, Request, Response};
@@ -254,6 +256,34 @@ pub enum ResponseState {
     Failed(String),
 }
 
+/// テキスト欄の表示領域とスクロール量 (クリック位置をカーソル位置に変換するのに使う)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EditorRegion {
+    pub area: Rect,
+    pub scroll_x: u16,
+    pub scroll_y: u16,
+}
+
+/// 直近の描画での各ペインの位置。マウスのクリック先を判定するために ui が記録する。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Regions {
+    pub collection: Rect,
+    /// Collection の一覧部分 (枠の内側) と、先頭に表示している項目の番号
+    pub collection_list: Rect,
+    pub collection_offset: usize,
+    /// Method と URL を合わせた領域
+    pub url: Rect,
+    pub url_editor: Option<EditorRegion>,
+    pub request: Rect,
+    pub request_tabs: Vec<Rect>,
+    pub request_editor: Option<EditorRegion>,
+    pub response: Rect,
+    pub response_tabs: Vec<Rect>,
+}
+
+/// マウスホイール 1 目盛りでスクロールする行数。
+const WHEEL_LINES: i32 = 3;
+
 pub const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 pub struct App {
@@ -280,6 +310,8 @@ pub struct App {
     pub preview_unavailable: Option<String>,
     /// 直近の描画で Preview タブを表示した領域 (ポップアップ表示中などは None)
     pub preview_area: Cell<Option<Rect>>,
+    /// 直近の描画での各ペインの位置 (マウス操作用)
+    pub regions: RefCell<Regions>,
     pub spinner: usize,
     pub status: String,
     pub pending: Pending,
@@ -317,6 +349,7 @@ impl App {
             preview_generation: 0,
             preview_unavailable: None,
             preview_area: Cell::new(None),
+            regions: RefCell::new(Regions::default()),
             spinner: 0,
             status: "? でヘルプ / Ctrl+R で送信 / Ctrl+H/J/K/L でペイン移動".to_string(),
             pending: Pending::None,
@@ -471,7 +504,97 @@ impl App {
                 }
                 Action::None
             }
+            Event::Mouse(mouse) => {
+                self.handle_mouse(mouse);
+                Action::None
+            }
             _ => Action::None,
+        }
+    }
+
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.click(mouse.column, mouse.row),
+            MouseEventKind::ScrollDown => self.wheel(mouse.column, mouse.row, WHEEL_LINES),
+            MouseEventKind::ScrollUp => self.wheel(mouse.column, mouse.row, -WHEEL_LINES),
+            _ => {}
+        }
+    }
+
+    /// 左クリック: ペイン / リクエスト / タブを選び、テキスト欄ならカーソルを置く。
+    fn click(&mut self, x: u16, y: u16) {
+        match self.mode {
+            Mode::Help => {
+                self.mode = Mode::Normal;
+                return;
+            }
+            Mode::Rename | Mode::Command => return,
+            Mode::Normal | Mode::Editing => {}
+        }
+        let regions = self.regions.borrow().clone();
+        let pos = Position::new(x, y);
+        let (target, editor) = if regions.collection.contains(pos) {
+            (Focus::Collection, None)
+        } else if regions.url.contains(pos) {
+            (Focus::Url, regions.url_editor)
+        } else if regions.request.contains(pos) {
+            (Focus::Request, regions.request_editor)
+        } else if regions.response.contains(pos) {
+            (Focus::Response, None)
+        } else {
+            return;
+        };
+        let editor = editor.filter(|e| e.area.contains(pos));
+        self.pending = Pending::None;
+        // 編集中の欄の中をクリックしたときだけ Insert モードのままにする
+        if self.mode == Mode::Editing && !(target == self.focus && editor.is_some()) {
+            self.leave_insert();
+        }
+        self.set_focus(target);
+
+        match target {
+            Focus::Collection => {
+                let list = regions.collection_list;
+                if list.contains(pos) {
+                    self.select(regions.collection_offset + (y - list.y) as usize);
+                }
+            }
+            Focus::Request => {
+                if let Some(i) = regions.request_tabs.iter().position(|r| r.contains(pos)) {
+                    self.request_tab = RequestTab::ALL[i];
+                }
+            }
+            Focus::Response => {
+                if let Some(i) = regions.response_tabs.iter().position(|r| r.contains(pos))
+                    && let Some(tab) = self.response_tabs().get(i)
+                {
+                    self.set_response_tab(*tab);
+                }
+            }
+            Focus::Url => {}
+        }
+
+        if let Some(region) = editor {
+            let insert = self.mode == Mode::Editing;
+            if let Some(ed) = self.active_editor() {
+                let row = ((y - region.area.y) as usize + region.scroll_y as usize)
+                    .min(ed.line_count() - 1);
+                let col = (x - region.area.x) as usize + region.scroll_x as usize;
+                ed.set_cursor(row, ed.col_at_display(row, col));
+                if !insert {
+                    ed.clamp_normal();
+                }
+            }
+        }
+    }
+
+    /// ホイール: Response の上ならフォーカスに関係なくスクロールする。
+    fn wheel(&mut self, x: u16, y: u16, delta: i32) {
+        if !matches!(self.mode, Mode::Normal | Mode::Editing) {
+            return;
+        }
+        if self.regions.borrow().response.contains(Position::new(x, y)) {
+            self.scroll_response_by(delta);
         }
     }
 
@@ -774,9 +897,12 @@ impl App {
     }
 
     fn scroll_response(&mut self, delta: i32) {
-        if self.focus != Focus::Response {
-            return;
+        if self.focus == Focus::Response {
+            self.scroll_response_by(delta);
         }
+    }
+
+    fn scroll_response_by(&mut self, delta: i32) {
         let next = (self.response_scroll as i32 + delta).clamp(0, self.max_scroll() as i32);
         self.response_scroll = next as u16;
     }
