@@ -15,6 +15,7 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 - HTML レスポンスのプレビュー (Preview タブ。ヘッドレス Chromium で描画し、kitty graphics protocol で端末に表示)
 - リクエストに対応する curl コマンドの表示 (cURL タブ、bash / zsh / sh 向け)
 - コレクション管理 (新規 / 複製 / 削除 / 名前変更) と JSON ファイルへの保存
+- マウス操作 (クリックでペイン / リクエスト / タブ / カーソル位置を選択、ホイールでスクロール)
 - ブラケットペースト対応、日本語などの全角文字の入力に対応
 
 ## インストール
@@ -66,6 +67,19 @@ Normal はブロックカーソル、Insert はバーカーソルで表示され
 | `H` / `L`, `gT` / `gt`, `1`-`4` | タブ切り替え |
 | `?` | ヘルプ |
 | `q` / `Ctrl+C` | 終了 |
+
+#### マウス
+
+| 操作 | 動作 |
+| --- | --- |
+| ペインをクリック | そのペインにフォーカス |
+| Collection のリクエストをクリック | リクエストを選択 |
+| タブ (Params / Headers / Body / cURL、Body / Headers / Preview) をクリック | タブ切り替え |
+| テキスト欄 (URL / Params / Headers / Body) をクリック | クリックした位置にカーソルを移動 |
+| Response 上でホイール | スクロール |
+
+マウス操作を受け取るため、端末の文字選択 (コピー) は `Shift` を押しながらドラッグしてください
+(端末によっては `Option` / `Alt`)。
 
 ペインは左に Collection、右に上から URL → Request → Response と並んでいます。
 Collection から `Ctrl+L` で戻ると、直前にいた右側のペインに戻ります。

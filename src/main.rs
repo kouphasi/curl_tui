@@ -7,7 +7,10 @@ use std::{
 use anyhow::Result;
 use crossterm::{
     cursor::SetCursorStyle,
-    event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream,
+    },
     execute,
 };
 use futures::StreamExt;
@@ -46,7 +49,13 @@ async fn main() -> Result<()> {
 
     // ratatui::init は raw mode / 代替画面 / パニック時の復元フックを設定する
     let mut terminal = ratatui::init();
-    execute!(std::io::stdout(), EnableBracketedPaste)?;
+    // パニック時もマウスキャプチャを解除してから端末を復元する
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        hook(info);
+    }));
+    execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     let result = run(&mut terminal, &mut app, &path, browser).await;
     if app.preview_unavailable.is_none() {
         let mut out = std::io::stdout();
@@ -56,6 +65,7 @@ async fn main() -> Result<()> {
     let _ = execute!(
         std::io::stdout(),
         DisableBracketedPaste,
+        DisableMouseCapture,
         SetCursorStyle::DefaultUserShape
     );
     ratatui::restore();
