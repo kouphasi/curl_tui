@@ -266,6 +266,8 @@ pub struct App {
     pub body: TextEditor,
     pub rename: TextEditor,
     pub focus: Focus,
+    /// フォーカス中のペインを全画面表示しているか (Shift+Esc / Ctrl+W z で切り替え)
+    pub zoomed: bool,
     pub mode: Mode,
     pub request_tab: RequestTab,
     pub response_tab: ResponseTab,
@@ -307,6 +309,7 @@ impl App {
             body: TextEditor::multi_line(""),
             rename: TextEditor::single_line(""),
             focus: Focus::Url,
+            zoomed: false,
             mode: Mode::Normal,
             request_tab: RequestTab::Params,
             response_tab: ResponseTab::Body,
@@ -489,6 +492,11 @@ impl App {
         if key.code == KeyCode::F(5) {
             return self.send();
         }
+        // Shift+Esc: フォーカス中のペインを全画面にする / 元に戻す
+        if key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::SHIFT) {
+            self.toggle_zoom();
+            return Action::None;
+        }
 
         match self.mode {
             Mode::Help => {
@@ -582,6 +590,15 @@ impl App {
         }
     }
 
+    fn toggle_zoom(&mut self) {
+        self.zoomed = !self.zoomed;
+        self.status = if self.zoomed {
+            "全画面表示 (Shift+Esc / Ctrl+W z で戻る)".to_string()
+        } else {
+            "全画面表示を解除しました".to_string()
+        };
+    }
+
     fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
         if focus != Focus::Collection {
@@ -614,6 +631,7 @@ impl App {
             KeyCode::Char('W') => self.set_focus(self.focus.prev()),
             KeyCode::Char('t') => self.set_focus(Focus::Collection),
             KeyCode::Char('b') => self.set_focus(Focus::Response),
+            KeyCode::Char('z') => self.toggle_zoom(),
             _ => {}
         }
     }
@@ -1303,6 +1321,32 @@ mod tests {
     fn empty_collection_gets_default() {
         let app = App::new(vec![]);
         assert_eq!(app.collection.len(), 1);
+    }
+
+    #[test]
+    fn shift_esc_toggles_zoom_in_any_mode() {
+        let shift_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT);
+        let mut app = App::new(vec![]);
+        assert!(!app.zoomed);
+        app.handle_key(shift_esc);
+        assert!(app.zoomed);
+        // 素の Esc では解除されない
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.zoomed);
+        // Insert 中でもモードを変えずに切り替わる
+        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(shift_esc);
+        assert!(!app.zoomed);
+        assert_eq!(app.mode, Mode::Editing);
+        app.handle_key(key(KeyCode::Esc));
+        // Shift+Esc が届かない端末向けの Ctrl+W z
+        app.handle_key(ctrl('w'));
+        app.handle_key(key(KeyCode::Char('z')));
+        assert!(app.zoomed);
+        // 全画面のままペインを移動できる
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Request);
+        assert!(app.zoomed);
     }
 
     #[test]
