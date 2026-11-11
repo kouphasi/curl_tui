@@ -62,19 +62,29 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, app, header);
     draw_footer(frame, app, footer);
 
-    let [sidebar, content] =
-        Layout::horizontal([Constraint::Length(28), Constraint::Min(20)]).areas(main);
-    draw_collection(frame, app, sidebar);
+    if app.zoomed {
+        // 全画面表示: フォーカス中のペインだけを描く
+        match app.focus {
+            Focus::Collection => draw_collection(frame, app, main),
+            Focus::Url => draw_url(frame, app, main),
+            Focus::Request => draw_request(frame, app, main),
+            Focus::Response => draw_response(frame, app, main),
+        }
+    } else {
+        let [sidebar, content] =
+            Layout::horizontal([Constraint::Length(28), Constraint::Min(20)]).areas(main);
+        draw_collection(frame, app, sidebar);
 
-    let [url_row, request, response] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Percentage(40),
-        Constraint::Min(5),
-    ])
-    .areas(content);
-    draw_url(frame, app, url_row);
-    draw_request(frame, app, request);
-    draw_response(frame, app, response);
+        let [url_row, request, response] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Percentage(40),
+            Constraint::Min(5),
+        ])
+        .areas(content);
+        draw_url(frame, app, url_row);
+        draw_request(frame, app, request);
+        draw_response(frame, app, response);
+    }
 
     match app.mode {
         Mode::Help => draw_help(frame),
@@ -98,6 +108,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::raw(" curl_tui ").bold().fg(Color::Cyan),
         mode,
+        if app.zoomed {
+            Span::raw(" ZOOM ").black().on_yellow()
+        } else {
+            Span::raw("")
+        },
         Span::raw("  "),
         Span::raw(app.status.clone()).fg(Color::Gray),
     ]);
@@ -465,6 +480,10 @@ fn draw_help(frame: &mut Frame) {
     let rows: &[(&str, &str)] = &[
         ("Ctrl+H/J/K/L", "ペイン移動 (左 / 下 / 上 / 右)"),
         ("Ctrl+W h/j/k/l/w", "ペイン移動 (Vim のウィンドウ操作)"),
+        (
+            "Shift+Esc / Ctrl+W z",
+            "選択中のペインを全画面表示 / 元に戻す",
+        ),
         ("Ctrl+R / F5", "リクエスト送信 (:send も可)"),
         (":w / :q / :wq", "保存 / 終了 / 保存して終了"),
         ("m / M", "メソッド切り替え"),
@@ -566,6 +585,27 @@ mod tests {
             "Response",
         ] {
             assert!(screen.contains(s), "missing {s:?}\n{screen}");
+        }
+    }
+
+    #[test]
+    fn zoom_shows_only_focused_pane() {
+        let mut app = App::new(vec![]);
+        app.zoomed = true;
+        app.focus = Focus::Response;
+        let screen = render(&app);
+        assert!(screen.contains("ZOOM"));
+        assert!(screen.contains("Response"));
+        for hidden in ["Collection", "Method", "Request "] {
+            assert!(!screen.contains(hidden), "{hidden} が表示されている");
+        }
+        // ペインは画面の幅いっぱいに広がる
+        let top = screen.lines().nth(1).unwrap();
+        assert!(top.chars().filter(|c| *c == '━').count() > 100);
+
+        for focus in [Focus::Collection, Focus::Url, Focus::Request] {
+            app.focus = focus;
+            render(&app);
         }
     }
 

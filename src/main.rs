@@ -7,8 +7,12 @@ use std::{
 use anyhow::Result;
 use crossterm::{
     cursor::SetCursorStyle,
-    event::{DisableBracketedPaste, EnableBracketedPaste, Event, EventStream},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
+    terminal::supports_keyboard_enhancement,
 };
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
@@ -47,11 +51,23 @@ async fn main() -> Result<()> {
     // ratatui::init は raw mode / 代替画面 / パニック時の復元フックを設定する
     let mut terminal = ratatui::init();
     execute!(std::io::stdout(), EnableBracketedPaste)?;
+    // 通常の端末では Shift+Esc が素の Esc と区別できない。kitty keyboard protocol に
+    // 対応した端末では修飾キー付きの Esc を受け取れるようにする
+    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced {
+        execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
     let result = run(&mut terminal, &mut app, &path, browser).await;
     if app.preview_unavailable.is_none() {
         let mut out = std::io::stdout();
         let _ = out.write_all(kitty::free().as_bytes());
         let _ = out.flush();
+    }
+    if enhanced {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = execute!(
         std::io::stdout(),

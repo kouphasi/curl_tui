@@ -60,6 +60,7 @@ Normal はブロックカーソル、Insert はバーカーソルで表示され
 | `Ctrl+H` / `Ctrl+J` / `Ctrl+K` / `Ctrl+L` | ペイン移動 (左 / 下 / 上 / 右) |
 | `Ctrl+W` `h`/`j`/`k`/`l` | ペイン移動 (`Ctrl+W w` / `W` で順送り / 逆送り) |
 | `Tab` / `Shift+Tab` | ペインを順番に移動 (従来の操作) |
+| `Shift+Esc` / `Ctrl+W z` | 選択中のペインを全画面表示 / 元に戻す |
 | `Ctrl+R` / `F5` / `:send` | 送信 |
 | `:w` / `:q` / `:wq` (`:x`) | 保存 / 終了 / 保存して終了 (`Ctrl+S` でも保存) |
 | `m` / `M` | メソッド切り替え |
@@ -69,6 +70,10 @@ Normal はブロックカーソル、Insert はバーカーソルで表示され
 
 ペインは左に Collection、右に上から URL → Request → Response と並んでいます。
 Collection から `Ctrl+L` で戻ると、直前にいた右側のペインに戻ります。
+
+`Shift+Esc` は kitty keyboard protocol に対応した端末 (kitty / Ghostty / WezTerm / foot など) で使えます。
+それ以外の端末では `Shift+Esc` が `Esc` と区別できないため、`Ctrl+W z` を使ってください。
+全画面表示中もペイン移動はでき、移動先のペインが全画面で表示されます。
 
 #### テキスト欄 (URL / Params / Headers / Body)
 
