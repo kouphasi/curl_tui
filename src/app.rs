@@ -419,6 +419,15 @@ impl App {
         }
     }
 
+    /// Preview タブを見ている間は Response ペインを全画面にする。
+    /// 別のタブやペインに移ると元のレイアウトに戻る。
+    pub fn preview_fullscreen(&self) -> bool {
+        self.focus == Focus::Response
+            && self.response_tab == ResponseTab::Preview
+            && self.response_is_html()
+            && self.preview_unavailable.is_none()
+    }
+
     fn set_response_tab(&mut self, tab: ResponseTab) {
         if self.response_tabs().contains(&tab) {
             self.response_tab = tab;

@@ -62,19 +62,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, app, header);
     draw_footer(frame, app, footer);
 
-    let [sidebar, content] =
-        Layout::horizontal([Constraint::Length(28), Constraint::Min(20)]).areas(main);
-    draw_collection(frame, app, sidebar);
+    if app.preview_fullscreen() {
+        // プレビュー中は他のペインを隠し、Response ペインを画面いっぱいに広げる
+        draw_response(frame, app, main);
+    } else {
+        let [sidebar, content] =
+            Layout::horizontal([Constraint::Length(28), Constraint::Min(20)]).areas(main);
+        draw_collection(frame, app, sidebar);
 
-    let [url_row, request, response] = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Percentage(40),
-        Constraint::Min(5),
-    ])
-    .areas(content);
-    draw_url(frame, app, url_row);
-    draw_request(frame, app, request);
-    draw_response(frame, app, response);
+        let [url_row, request, response] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Percentage(40),
+            Constraint::Min(5),
+        ])
+        .areas(content);
+        draw_url(frame, app, url_row);
+        draw_request(frame, app, request);
+        draw_response(frame, app, response);
+    }
 
     match app.mode {
         Mode::Help => draw_help(frame),
@@ -150,6 +155,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("Ctrl+R", "送信"),
         ],
         (_, Focus::Request) => &[("H/L,1-4", "タブ"), ("Ctrl+R", "送信")],
+        (_, Focus::Response) if app.preview_fullscreen() => &[
+            ("j/k", "スクロール"),
+            ("Ctrl+D/U", "半ページ"),
+            ("gg/G", "先頭/末尾"),
+            ("1/2, H/L", "全画面を解除 (Body / Headers)"),
+        ],
         (_, Focus::Response) => &[
             ("j/k", "スクロール"),
             ("Ctrl+D/U", "半ページ"),
@@ -435,6 +446,16 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
         );
         return;
     }
+    if !app.preview_fullscreen() {
+        // 画像は全画面のときだけ出す (小さいペイン用に描き直すと切り替えのたびに待たされる)
+        frame.render_widget(
+            Paragraph::new("Response ペインに移動すると全画面でプレビューします")
+                .fg(Color::DarkGray)
+                .centered(),
+            area,
+        );
+        return;
+    }
     // 描画済みでも幅が変われば main が描き直すので、領域は常に知らせる
     app.preview_area.set(Some(area));
     let msg = match &app.preview {
@@ -666,7 +687,31 @@ mod tests {
         app.handle_key(crossterm::event::KeyEvent::from(
             crossterm::event::KeyCode::Char('3'),
         ));
-        assert!(render(&app).contains("ブラウザで描画中"));
+        let screen = render(&app);
+        assert!(screen.contains("ブラウザで描画中"));
+        // 全画面: 他のペインは消え、ヘッダとフッタを除く画面全体を使う
+        assert!(!screen.contains("Collection"));
+        assert!(!screen.contains("Method"));
+        let area = app.preview_area.get().unwrap();
+        assert_eq!((area.x, area.y, area.width, area.height), (1, 3, 118, 35));
+
+        // 別のペインに移ると元のレイアウトに戻り、画像は出さない
+        app.focus = Focus::Request;
+        let screen = render(&app);
+        assert!(screen.contains("Collection"));
+        assert!(screen.contains("全画面でプレビュー"));
+        assert_eq!(app.preview_area.get(), None);
+        app.focus = Focus::Response;
+
+        // Body タブに切り替えても元に戻る
+        app.handle_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char('1'),
+        ));
+        assert!(render(&app).contains("Collection"));
+        app.handle_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char('3'),
+        ));
+        render(&app);
         assert!(app.preview_area.get().is_some());
 
         // ヘルプ表示中は画像を出さない

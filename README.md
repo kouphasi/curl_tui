@@ -79,9 +79,12 @@ Collection から `Ctrl+L` で戻ると、直前にいた右側のペインに�
 レスポンスの `Content-Type` が `text/html` (または `application/xhtml+xml`) のときだけ、
 Response に **Preview** タブが出ます。JSON などそれ以外のレスポンスでは出ません。
 
-Preview タブを開くと、ヘッドレス Chromium で HTML を Response ペインの幅に合わせて描画し、
+Preview タブを開くと、ヘッドレス Chromium で HTML を画面の幅に合わせて描画し、
 その画像を [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) で
-ペイン内に表示します。`j` / `k` / `Ctrl+D` などでスクロールできます。
+表示します。`j` / `k` / `Ctrl+D` などでスクロールできます。
+
+Preview タブを開いている間は、Response ペインが一時的に全画面 (ヘッダ行とフッタ行以外) に広がります。
+`1` / `2` / `H` / `L` で別のタブに切り替えるか、`Ctrl+K` などで別のペインに移ると元のレイアウトに戻ります。
 
 - 静止画のプレビューです。リンクのクリックやフォーム入力などの操作はできません
 - `<base href>` を差し込むので、相対パスの画像や CSS はレスポンスの URL 基準で読み込まれます
