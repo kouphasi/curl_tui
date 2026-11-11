@@ -6,6 +6,7 @@
 use std::cell::Cell;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::Rect;
 
 use crate::editor::TextEditor;
 use crate::model::{self, HttpMethod, Request, Response};
@@ -192,6 +193,8 @@ impl RequestTab {
 pub enum ResponseTab {
     Body,
     Headers,
+    /// HTML をブラウザで描画した画像 (HTML のレスポンスのときだけ選べる)
+    Preview,
 }
 
 impl ResponseTab {
@@ -199,15 +202,23 @@ impl ResponseTab {
         match self {
             ResponseTab::Body => 0,
             ResponseTab::Headers => 1,
+            ResponseTab::Preview => 2,
         }
     }
+}
 
-    fn toggle(self) -> Self {
-        match self {
-            ResponseTab::Body => ResponseTab::Headers,
-            ResponseTab::Headers => ResponseTab::Body,
-        }
-    }
+/// HTML プレビューの描画状態。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewState {
+    /// まだ描画していない (Preview タブを開くと描画を始める)
+    Idle,
+    Rendering,
+    /// 描画済み。`cols` は描画した幅 (セル数)、`rows` は画像の高さ (セル数)
+    Ready {
+        cols: u16,
+        rows: u16,
+    },
+    Failed(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,6 +273,13 @@ pub struct App {
     pub response_scroll: u16,
     /// 直近の描画でのレスポンス表示領域の高さ (Ctrl+D などのページ送りに使う)
     pub response_height: Cell<u16>,
+    pub preview: PreviewState,
+    /// レスポンスごとに増える番号。古いレスポンスの描画結果を捨てるのに使う
+    pub preview_generation: u64,
+    /// プレビューが使えない理由 (端末やブラウザが未対応)。main が起動時に設定する
+    pub preview_unavailable: Option<String>,
+    /// 直近の描画で Preview タブを表示した領域 (ポップアップ表示中などは None)
+    pub preview_area: Cell<Option<Rect>>,
     pub spinner: usize,
     pub status: String,
     pub pending: Pending,
@@ -295,6 +313,10 @@ impl App {
             response: ResponseState::Empty,
             response_scroll: 0,
             response_height: Cell::new(0),
+            preview: PreviewState::Idle,
+            preview_generation: 0,
+            preview_unavailable: None,
+            preview_area: Cell::new(None),
             spinner: 0,
             status: "? でヘルプ / Ctrl+R で送信 / Ctrl+H/J/K/L でペイン移動".to_string(),
             pending: Pending::None,
@@ -351,6 +373,7 @@ impl App {
         self.load_selected();
         if self.response != ResponseState::Loading {
             self.response = ResponseState::Empty;
+            self.reset_preview();
         }
         self.response_scroll = 0;
     }
@@ -373,6 +396,36 @@ impl App {
         self.response == ResponseState::Loading
     }
 
+    /// スピナーを回す必要があるか。
+    pub fn is_busy(&self) -> bool {
+        self.is_loading() || self.preview == PreviewState::Rendering
+    }
+
+    /// 表示中のレスポンスが HTML か。
+    pub fn response_is_html(&self) -> bool {
+        matches!(&self.response, ResponseState::Done(r) if r.is_html())
+    }
+
+    /// 選択できるレスポンスタブ (Preview は HTML のときだけ)。
+    pub fn response_tabs(&self) -> &'static [ResponseTab] {
+        if self.response_is_html() {
+            &[
+                ResponseTab::Body,
+                ResponseTab::Headers,
+                ResponseTab::Preview,
+            ]
+        } else {
+            &[ResponseTab::Body, ResponseTab::Headers]
+        }
+    }
+
+    fn set_response_tab(&mut self, tab: ResponseTab) {
+        if self.response_tabs().contains(&tab) {
+            self.response_tab = tab;
+            self.response_scroll = 0;
+        }
+    }
+
     pub fn tick(&mut self) {
         self.spinner = (self.spinner + 1) % SPINNER.len();
     }
@@ -380,6 +433,7 @@ impl App {
     /// 送信結果を反映する。
     pub fn set_response(&mut self, result: Result<Response, String>) {
         self.response_scroll = 0;
+        self.reset_preview();
         match result {
             Ok(r) => {
                 self.status = format!("{} {} ({} ms)", r.status, r.status_text, r.elapsed_ms);
@@ -390,6 +444,15 @@ impl App {
                 self.response = ResponseState::Failed(e);
             }
         }
+        // HTML 以外では Preview タブは選べない
+        if !self.response_tabs().contains(&self.response_tab) {
+            self.response_tab = ResponseTab::Body;
+        }
+    }
+
+    fn reset_preview(&mut self) {
+        self.preview = PreviewState::Idle;
+        self.preview_generation += 1;
     }
 
     pub fn handle_event(&mut self, event: Event) -> Action {
@@ -601,8 +664,13 @@ impl App {
         match self.focus {
             Focus::Request => self.request_tab = self.request_tab.cycle(delta),
             Focus::Response => {
-                self.response_tab = self.response_tab.toggle();
-                self.response_scroll = 0;
+                let tabs = self.response_tabs();
+                let len = tabs.len() as isize;
+                let cur = tabs
+                    .iter()
+                    .position(|t| *t == self.response_tab)
+                    .unwrap_or(0) as isize;
+                self.set_response_tab(tabs[(cur + delta).rem_euclid(len) as usize]);
             }
             _ => {}
         }
@@ -672,12 +740,13 @@ impl App {
                 self.request_tab = RequestTab::ALL[(c as u8 - b'1') as usize];
             }
             KeyCode::Char('1') if self.focus == Focus::Response => {
-                self.response_tab = ResponseTab::Body;
-                self.response_scroll = 0;
+                self.set_response_tab(ResponseTab::Body)
             }
             KeyCode::Char('2') if self.focus == Focus::Response => {
-                self.response_tab = ResponseTab::Headers;
-                self.response_scroll = 0;
+                self.set_response_tab(ResponseTab::Headers)
+            }
+            KeyCode::Char('3') if self.focus == Focus::Response => {
+                self.set_response_tab(ResponseTab::Preview)
             }
             _ => match self.focus {
                 Focus::Collection => self.handle_collection_key(key),
@@ -1116,6 +1185,13 @@ impl App {
             ResponseState::Done(r) => match self.response_tab {
                 ResponseTab::Body => r.body.lines().count(),
                 ResponseTab::Headers => r.headers.len(),
+                // 画像は最後まで表示したところで止める
+                ResponseTab::Preview => match self.preview {
+                    PreviewState::Ready { rows, .. } => {
+                        return rows.saturating_sub(self.response_height.get());
+                    }
+                    _ => 0,
+                },
             },
             _ => 0,
         };
@@ -1207,6 +1283,7 @@ mod tests {
             headers: vec![("content-type".into(), "application/json".into())],
             body: body.into(),
             size: body.len(),
+            ..Default::default()
         }
     }
 
@@ -1425,6 +1502,58 @@ mod tests {
             panic!("expected Save");
         };
         assert_eq!(reqs[0].method, HttpMethod::Post);
+    }
+
+    fn html_response() -> Response {
+        Response {
+            status: 200,
+            headers: vec![("Content-Type".into(), "text/html; charset=utf-8".into())],
+            body: "<html><body>hi</body></html>".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn preview_tab_only_for_html() {
+        let mut app = App::new(vec![]);
+        app.focus = Focus::Response;
+        // JSON では Preview タブは選べない
+        app.set_response(Ok(sample_response("{}")));
+        app.handle_key(key(KeyCode::Char('3')));
+        assert_eq!(app.response_tab, ResponseTab::Body);
+        app.handle_key(key(KeyCode::Char('L')));
+        app.handle_key(key(KeyCode::Char('L')));
+        assert_eq!(app.response_tab, ResponseTab::Body);
+
+        // HTML なら選べる
+        app.set_response(Ok(html_response()));
+        app.handle_key(key(KeyCode::Char('3')));
+        assert_eq!(app.response_tab, ResponseTab::Preview);
+        app.handle_key(key(KeyCode::Char('L')));
+        assert_eq!(app.response_tab, ResponseTab::Body);
+        app.handle_key(key(KeyCode::Char('H')));
+        assert_eq!(app.response_tab, ResponseTab::Preview);
+
+        // 次のレスポンスが JSON なら Body に戻る
+        let generation = app.preview_generation;
+        app.set_response(Ok(sample_response("{}")));
+        assert_eq!(app.response_tab, ResponseTab::Body);
+        assert_eq!(app.preview, PreviewState::Idle);
+        assert!(app.preview_generation > generation);
+    }
+
+    #[test]
+    fn preview_scroll_is_limited_to_image_height() {
+        let mut app = App::new(vec![]);
+        app.focus = Focus::Response;
+        app.set_response(Ok(html_response()));
+        app.handle_key(key(KeyCode::Char('3')));
+        app.response_height.set(10);
+        app.preview = PreviewState::Ready { cols: 80, rows: 25 };
+        app.handle_key(key(KeyCode::Char('G')));
+        assert_eq!(app.response_scroll, 15);
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.response_scroll, 15);
     }
 
     #[test]

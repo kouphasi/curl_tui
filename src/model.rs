@@ -205,8 +205,10 @@ fn to_lines(items: &[KeyValue], sep: &str) -> String {
 }
 
 /// 受信したレスポンス。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Response {
+    /// リダイレクト後の最終的な URL
+    pub url: String,
     pub status: u16,
     pub status_text: String,
     pub elapsed_ms: u128,
@@ -220,6 +222,36 @@ pub struct Response {
 impl Response {
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
+    }
+
+    pub fn content_type(&self) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// HTML のレスポンスか (Preview タブを出すかの判定)。
+    ///
+    /// Content-Type が text/html または application/xhtml+xml のときだけ真。
+    /// Content-Type が無い場合に限り、本文が `<!doctype html` / `<html` で始まるかで判定する。
+    pub fn is_html(&self) -> bool {
+        match self.content_type() {
+            Some(ct) => {
+                let mime = ct
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                mime == "text/html" || mime == "application/xhtml+xml"
+            }
+            None => {
+                let head: String = self.body.trim_start().chars().take(15).collect();
+                let head = head.to_ascii_lowercase();
+                head.starts_with("<!doctype html") || head.starts_with("<html")
+            }
+        }
     }
 }
 
@@ -358,14 +390,27 @@ mod tests {
     fn response_success_range() {
         let mut r = Response {
             status: 204,
-            status_text: String::new(),
-            elapsed_ms: 0,
-            headers: vec![],
-            body: String::new(),
-            size: 0,
+            ..Default::default()
         };
         assert!(r.is_success());
         r.status = 404;
         assert!(!r.is_success());
+    }
+
+    #[test]
+    fn html_detection_uses_content_type() {
+        let with = |ct: Option<&str>, body: &str| Response {
+            headers: ct
+                .map(|c| vec![("Content-Type".to_string(), c.to_string())])
+                .unwrap_or_default(),
+            body: body.into(),
+            ..Default::default()
+        };
+        assert!(with(Some("text/html; charset=utf-8"), "").is_html());
+        assert!(with(Some("application/xhtml+xml"), "").is_html());
+        assert!(!with(Some("application/json"), "<html></html>").is_html());
+        assert!(!with(Some("text/plain"), "<!DOCTYPE html>").is_html());
+        assert!(with(None, "  <!DOCTYPE html><html>").is_html());
+        assert!(!with(None, "{\"a\":1}").is_html());
     }
 }

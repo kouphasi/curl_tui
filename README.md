@@ -12,6 +12,7 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 - URL・クエリパラメータ・ヘッダ・ボディの編集 (`#` で始まる行は無効化)
 - 非同期送信 (UI をブロックしない / スピナー表示 / 30 秒タイムアウト)
 - レスポンスのステータス・所要時間・サイズ・ヘッダ表示、JSON の自動整形
+- HTML レスポンスのプレビュー (Preview タブ。ヘッドレス Chromium で描画し、kitty graphics protocol で端末に表示)
 - リクエストに対応する curl コマンドの表示 (cURL タブ、bash / zsh / sh 向け)
 - コレクション管理 (新規 / 複製 / 削除 / 名前変更) と JSON ファイルへの保存
 - ブラケットペースト対応、日本語などの全角文字の入力に対応
@@ -93,8 +94,33 @@ Collection から `Ctrl+L` で戻ると、直前にいた右側のペインに�
 | `j` / `k`, `Ctrl+E` / `Ctrl+Y` | (Response) 1 行スクロール |
 | `Ctrl+D` / `Ctrl+U`, `Ctrl+F` / `Ctrl+B` | (Response) 半ページ / 1 ページ送り |
 | `gg` / `G` | (Response) 先頭 / 末尾 |
+| `1` / `2` / `3`, `H` / `L` | (Response) Body / Headers / Preview タブ (Preview は HTML のときだけ) |
 
 入力途中のキー (`d`, `g`, `^W` など) はヘッダ行の右端に表示されます。`Esc` で取り消せます。
+
+## HTML プレビュー (Preview タブ)
+
+レスポンスの `Content-Type` が `text/html` (または `application/xhtml+xml`) のときだけ、
+Response に **Preview** タブが出ます。JSON などそれ以外のレスポンスでは出ません。
+
+Preview タブを開くと、ヘッドレス Chromium で HTML を Response ペインの幅に合わせて描画し、
+その画像を [kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/) で
+ペイン内に表示します。`j` / `k` / `Ctrl+D` などでスクロールできます。
+
+- 静止画のプレビューです。リンクのクリックやフォーム入力などの操作はできません
+- `<base href>` を差し込むので、相対パスの画像や CSS はレスポンスの URL 基準で読み込まれます
+- 撮影する高さはペインの 4 画面分 (最大 8000px) までです。それより長いページは切れます
+- 端末の幅を変えると描き直します
+
+必要なもの:
+
+- kitty graphics protocol 対応端末 (kitty / Ghostty / WezTerm など)。tmux 内では使えません
+- Chromium 系ブラウザ (`chrome-headless-shell` / `chromium` / `google-chrome` / Microsoft Edge / Brave を自動で探します)
+
+| 環境変数 | 意味 |
+| --- | --- |
+| `CURL_TUI_BROWSER` | 使うブラウザの実行ファイル (例: `/usr/bin/chromium`) |
+| `CURL_TUI_GRAPHICS` | `kitty` で端末判定を飛ばして強制有効化、`none` で無効化 |
 
 ## cURL タブについて
 
@@ -112,10 +138,13 @@ src/
 ├── curl.rs        # curl コマンド生成 (bash / zsh / sh 向け)
 ├── model.rs       # Request / Response / ヘッダ・パラメータのパース、curl 生成
 ├── http.rs        # reqwest による送信、JSON 整形
+├── preview.rs     # HTML をヘッドレス Chromium で PNG に描画
+├── kitty.rs       # kitty graphics protocol のエスケープシーケンス生成・対応端末の判定
 └── collection.rs  # コレクションの保存 / 読み込み
 tests/
 ├── http_integration.rs  # ローカルのモック HTTP サーバに実際に送信する結合テスト
-└── curl_shells.rs       # 生成した curl コマンドを実際のシェルで解釈させるテスト
+├── curl_shells.rs       # 生成した curl コマンドを実際のシェルで解釈させるテスト
+└── preview_render.rs    # 実際のブラウザで HTML を描画するテスト (CURL_TUI_BROWSER 指定時のみ)
 ```
 
 ## テスト
