@@ -291,7 +291,7 @@ name = "curl_tui"
 version = "0.1.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "crossterm",
  "dirs",
  "futures",
