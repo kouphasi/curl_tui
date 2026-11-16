@@ -242,6 +242,18 @@ impl TextEditor {
         self.col = col.min(self.line_len(self.row));
     }
 
+    /// 表示上の列 (全角文字は 2 カラム) に対応する文字単位の列。行末より右は行末に丸める。
+    pub fn col_at_display(&self, row: usize, display_col: usize) -> usize {
+        let mut width = 0;
+        for (i, c) in self.lines[row].chars().enumerate() {
+            width += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if display_col < width {
+                return i;
+            }
+        }
+        self.line_len(row)
+    }
+
     /// Normal モード用にカーソルを丸める (行末の 1 つ先には置かない)。
     pub fn clamp_normal(&mut self) {
         self.col = self.col.min(self.line_len(self.row).saturating_sub(1));

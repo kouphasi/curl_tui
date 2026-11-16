@@ -8,8 +8,9 @@ use anyhow::Result;
 use crossterm::{
     cursor::SetCursorStyle,
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::supports_keyboard_enhancement,
@@ -50,7 +51,13 @@ async fn main() -> Result<()> {
 
     // ratatui::init は raw mode / 代替画面 / パニック時の復元フックを設定する
     let mut terminal = ratatui::init();
-    execute!(std::io::stdout(), EnableBracketedPaste)?;
+    // パニック時もマウスキャプチャを解除してから端末を復元する
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        hook(info);
+    }));
+    execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     // 通常の端末では Shift+Esc が素の Esc と区別できない。kitty keyboard protocol に
     // 対応した端末では修飾キー付きの Esc を受け取れるようにする
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
@@ -72,6 +79,7 @@ async fn main() -> Result<()> {
     let _ = execute!(
         std::io::stdout(),
         DisableBracketedPaste,
+        DisableMouseCapture,
         SetCursorStyle::DefaultUserShape
     );
     ratatui::restore();
