@@ -209,6 +209,12 @@ impl ResponseTab {
     }
 }
 
+/// プレビューの表示倍率 (%) の既定値・範囲・`+` / `-` での増減幅。
+pub const PREVIEW_ZOOM_DEFAULT: u16 = 100;
+pub const PREVIEW_ZOOM_MIN: u16 = 25;
+pub const PREVIEW_ZOOM_MAX: u16 = 400;
+pub const PREVIEW_ZOOM_STEP: u16 = 25;
+
 /// HTML プレビューの描画状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewState {
@@ -308,6 +314,8 @@ pub struct App {
     pub preview: PreviewState,
     /// レスポンスごとに増える番号。古いレスポンスの描画結果を捨てるのに使う
     pub preview_generation: u64,
+    /// プレビューの表示倍率 (%)。100 で端末の文字と同程度の大きさ
+    pub preview_zoom: u16,
     /// プレビューが使えない理由 (端末やブラウザが未対応)。main が起動時に設定する
     pub preview_unavailable: Option<String>,
     /// 直近の描画で Preview タブを表示した領域 (ポップアップ表示中などは None)
@@ -350,6 +358,7 @@ impl App {
             response_height: Cell::new(0),
             preview: PreviewState::Idle,
             preview_generation: 0,
+            preview_zoom: PREVIEW_ZOOM_DEFAULT,
             preview_unavailable: None,
             preview_area: Cell::new(None),
             regions: RefCell::new(Regions::default()),
@@ -489,6 +498,31 @@ impl App {
     fn reset_preview(&mut self) {
         self.preview = PreviewState::Idle;
         self.preview_generation += 1;
+    }
+
+    /// プレビューの表示倍率を変えて描き直す。
+    pub fn set_preview_zoom(&mut self, percent: i32) {
+        let zoom = percent.clamp(PREVIEW_ZOOM_MIN as i32, PREVIEW_ZOOM_MAX as i32) as u16;
+        self.status = format!("プレビュー倍率 {zoom}%");
+        if zoom != self.preview_zoom {
+            self.preview_zoom = zoom;
+            self.response_scroll = 0;
+            self.reset_preview();
+        }
+    }
+
+    fn handle_preview_zoom_key(&mut self, key: KeyEvent) -> bool {
+        if self.response_tab != ResponseTab::Preview || self.preview_unavailable.is_some() {
+            return false;
+        }
+        let zoom = self.preview_zoom as i32;
+        match key.code {
+            KeyCode::Char('+' | '=') => self.set_preview_zoom(zoom + PREVIEW_ZOOM_STEP as i32),
+            KeyCode::Char('-') => self.set_preview_zoom(zoom - PREVIEW_ZOOM_STEP as i32),
+            KeyCode::Char('0') => self.set_preview_zoom(PREVIEW_ZOOM_DEFAULT as i32),
+            _ => return false,
+        }
+        true
     }
 
     pub fn handle_event(&mut self, event: Event) -> Action {
@@ -1312,6 +1346,9 @@ impl App {
     }
 
     fn handle_response_key(&mut self, key: KeyEvent) {
+        if self.handle_preview_zoom_key(key) {
+            return;
+        }
         match key.code {
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => self.scroll_response(1),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_response(-1),
@@ -1724,6 +1761,43 @@ mod tests {
         assert_eq!(app.response_scroll, 15);
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(app.response_scroll, 15);
+    }
+
+    #[test]
+    fn preview_zoom_keys_rerender() {
+        let mut app = App::new(vec![]);
+        app.focus = Focus::Response;
+        app.set_response(Ok(html_response()));
+        // Preview タブ以外では効かない
+        app.handle_key(key(KeyCode::Char('+')));
+        assert_eq!(app.preview_zoom, 100);
+
+        app.handle_key(key(KeyCode::Char('3')));
+        app.preview = PreviewState::Ready { cols: 80, rows: 25 };
+        app.response_scroll = 5;
+        let generation = app.preview_generation;
+        app.handle_key(key(KeyCode::Char('+')));
+        assert_eq!(app.preview_zoom, 125);
+        assert_eq!(app.preview, PreviewState::Idle);
+        assert_eq!(app.response_scroll, 0);
+        assert!(app.preview_generation > generation);
+        assert!(app.status.contains("125%"));
+
+        app.handle_key(key(KeyCode::Char('-')));
+        app.handle_key(key(KeyCode::Char('-')));
+        assert_eq!(app.preview_zoom, 75);
+        app.handle_key(key(KeyCode::Char('0')));
+        assert_eq!(app.preview_zoom, 100);
+
+        // 範囲外には出ない
+        for _ in 0..30 {
+            app.handle_key(key(KeyCode::Char('-')));
+        }
+        assert_eq!(app.preview_zoom, PREVIEW_ZOOM_MIN);
+        for _ in 0..30 {
+            app.handle_key(key(KeyCode::Char('=')));
+        }
+        assert_eq!(app.preview_zoom, PREVIEW_ZOOM_MAX);
     }
 
     #[test]

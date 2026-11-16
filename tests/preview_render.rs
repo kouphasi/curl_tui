@@ -20,10 +20,24 @@ async fn renders_html_to_png() {
         base_url: "http://example.invalid/".into(),
         width: 400,
         height: 1200,
+        scale_percent: 100,
     };
     let img = preview::render(&browser, &job).await.expect("render");
     assert_eq!(&img.png[1..4], b"PNG");
     assert_eq!(img.width, 400);
     // 下端の白い余白は切り詰められ、赤い 300px の部分だけが残る
     assert_eq!(img.height, 300);
+
+    // 200% では同じ画像サイズのまま、ページの内容が 2 倍の大きさで描かれる
+    let img = preview::render(
+        &browser,
+        &Job {
+            scale_percent: 200,
+            ..job
+        },
+    )
+    .await
+    .expect("render");
+    assert_eq!(img.width, 400);
+    assert_eq!(img.height, 600);
 }

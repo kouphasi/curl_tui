@@ -28,6 +28,29 @@ pub struct Job {
     pub width: u32,
     /// 撮影する高さ (これより長いページは切り捨てる)
     pub height: u32,
+    /// 表示倍率 (%)。`width` / `height` は出力画像のピクセル数のままで、
+    /// ページ側のレイアウト幅が `width * 100 / scale_percent` になる (大きいほど文字が大きい)
+    pub scale_percent: u32,
+}
+
+impl Job {
+    /// ブラウザに渡すウィンドウサイズ (CSS ピクセル)。
+    pub fn window_size(&self) -> (u32, u32) {
+        let scale = self.scale_percent.max(1) as u64;
+        let css = |px: u32| ((px as u64 * 100 + scale / 2) / scale).max(1) as u32;
+        (css(self.width), css(self.height))
+    }
+}
+
+/// 1 セルの高さ (ピクセル) から、端末の文字と同程度の大きさになる基準倍率 (%) を決める。
+///
+/// Retina など高解像度の画面では 1 セルのピクセル数が多く、等倍で描くと
+/// ページが極端に小さく見える。25% 刻みで 100%〜400% に丸める。
+pub fn auto_scale_percent(cell_h: u32) -> u32 {
+    // ブラウザ標準の 16px の文字は 1 行が 20px 前後
+    const CSS_LINE: u32 = 20;
+    let steps = (cell_h * 4 + CSS_LINE / 2) / CSS_LINE;
+    (steps * 25).clamp(100, 400)
 }
 
 /// 撮影する高さの上限 (ピクセル)。
@@ -99,6 +122,7 @@ pub async fn render(browser: &Path, job: &Job) -> anyhow::Result<Rendered> {
     std::fs::write(&html_path, inject_base(&job.html, &job.base_url))
         .context("一時ファイルの作成に失敗しました")?;
 
+    let (css_w, css_h) = job.window_size();
     let mut cmd = tokio::process::Command::new(browser);
     cmd.arg("--headless")
         .arg("--disable-gpu")
@@ -107,14 +131,17 @@ pub async fn render(browser: &Path, job: &Job) -> anyhow::Result<Rendered> {
         .arg("--no-first-run")
         .arg("--no-default-browser-check")
         .arg("--disable-extensions")
-        .arg("--force-device-scale-factor=1")
+        .arg(format!(
+            "--force-device-scale-factor={}",
+            job.scale_percent.max(1) as f64 / 100.0
+        ))
         // スクリプトや画像の読み込みを少し待ってから撮影する
         .arg("--virtual-time-budget=3000")
         .arg(format!(
             "--user-data-dir={}",
             dir.path().join("profile").display()
         ))
-        .arg(format!("--window-size={},{}", job.width, job.height))
+        .arg(format!("--window-size={css_w},{css_h}"))
         .arg(format!("--screenshot={}", png_path.display()))
         .arg(file_url(&html_path));
     if running_as_root() {
@@ -252,6 +279,30 @@ mod tests {
         writer.write_image_data(&data).unwrap();
         drop(writer);
         out
+    }
+
+    #[test]
+    fn window_size_shrinks_with_scale() {
+        let job = |scale_percent| Job {
+            html: String::new(),
+            base_url: String::new(),
+            width: 2000,
+            height: 3000,
+            scale_percent,
+        };
+        assert_eq!(job(100).window_size(), (2000, 3000));
+        assert_eq!(job(200).window_size(), (1000, 1500));
+        assert_eq!(job(150).window_size(), (1333, 2000));
+    }
+
+    #[test]
+    fn auto_scale_follows_cell_height() {
+        assert_eq!(auto_scale_percent(0), 100);
+        assert_eq!(auto_scale_percent(18), 100);
+        assert_eq!(auto_scale_percent(20), 100);
+        assert_eq!(auto_scale_percent(34), 175);
+        assert_eq!(auto_scale_percent(40), 200);
+        assert_eq!(auto_scale_percent(200), 400);
     }
 
     #[test]
