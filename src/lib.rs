@@ -7,6 +7,7 @@ pub mod config;
 pub mod curl;
 pub mod editor;
 pub mod http;
+pub mod i18n;
 pub mod keymap;
 pub mod kitty;
 pub mod model;

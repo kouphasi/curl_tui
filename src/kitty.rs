@@ -21,13 +21,21 @@ pub fn detect() -> Result<(), String> {
 fn detect_from(env: impl Fn(&str) -> Option<String>) -> Result<(), String> {
     match env("CURL_TUI_GRAPHICS").as_deref() {
         Some("kitty") => return Ok(()),
-        Some("none") => return Err("CURL_TUI_GRAPHICS=none で無効化されています".into()),
+        Some("none") => {
+            return Err(crate::t!(
+                "disabled by CURL_TUI_GRAPHICS=none",
+                "CURL_TUI_GRAPHICS=none で無効化されています"
+            )
+            .into());
+        }
         _ => {}
     }
     if env("TMUX").is_some() {
-        return Err(
-            "tmux 内では画像を表示できません (CURL_TUI_GRAPHICS=kitty で強制有効化)".into(),
-        );
+        return Err(crate::t!(
+            "images cannot be shown inside tmux (force with CURL_TUI_GRAPHICS=kitty)",
+            "tmux 内では画像を表示できません (CURL_TUI_GRAPHICS=kitty で強制有効化)"
+        )
+        .into());
     }
     let term = env("TERM").unwrap_or_default();
     let term_program = env("TERM_PROGRAM").unwrap_or_default();
@@ -40,7 +48,9 @@ fn detect_from(env: impl Fn(&str) -> Option<String>) -> Result<(), String> {
     if supported {
         Ok(())
     } else {
-        Err(format!(
+        Err(crate::tf!(
+            "this terminal (TERM={term}) does not seem to support the kitty graphics protocol \
+             (works in kitty / Ghostty / WezTerm; force with CURL_TUI_GRAPHICS=kitty)",
             "この端末 (TERM={term}) は kitty graphics protocol に未対応のようです \
              (kitty / Ghostty / WezTerm で利用可。CURL_TUI_GRAPHICS=kitty で強制有効化)"
         ))

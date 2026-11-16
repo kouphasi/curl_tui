@@ -14,6 +14,7 @@ use crate::curl;
 use crate::editor::TextEditor;
 use crate::keymap::{Command, ContextSet, Ctx, KeyStroke, Keymap, Lookup};
 use crate::model::{self, HttpMethod, Request, Response};
+use crate::{t, tf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -377,7 +378,11 @@ impl App {
             preview_area: Cell::new(None),
             regions: RefCell::new(Regions::default()),
             spinner: 0,
-            status: "? でヘルプ / Ctrl+R で送信 / Ctrl+H/J/K/L でペイン移動".to_string(),
+            status: t!(
+                "? for help / Ctrl+R to send / Ctrl+H/J/K/L to move between panes",
+                "? でヘルプ / Ctrl+R で送信 / Ctrl+H/J/K/L でペイン移動"
+            )
+            .to_string(),
             keymap: Keymap::default(),
             keys: Vec::new(),
             operator: None,
@@ -685,7 +690,7 @@ impl App {
                 self.response = ResponseState::Done(r);
             }
             Err(e) => {
-                self.status = "送信に失敗しました".to_string();
+                self.status = t!("Request failed", "送信に失敗しました").to_string();
                 self.response = ResponseState::Failed(e);
             }
         }
@@ -703,7 +708,7 @@ impl App {
     /// プレビューの表示倍率を変えて描き直す。
     pub fn set_preview_zoom(&mut self, percent: i32) {
         let zoom = percent.clamp(PREVIEW_ZOOM_MIN as i32, PREVIEW_ZOOM_MAX as i32) as u16;
-        self.status = format!("プレビュー倍率 {zoom}%");
+        self.status = tf!("Preview zoom {zoom}%", "プレビュー倍率 {zoom}%");
         if zoom != self.preview_zoom {
             self.preview_zoom = zoom;
             self.response_scroll = 0;
@@ -1072,21 +1077,24 @@ impl App {
                 self.collection
                     .insert(self.selected + 1, Request::default());
                 self.select(self.selected + 1);
-                self.status = "新しいリクエストを追加しました".to_string();
+                self.status =
+                    t!("Added a new request", "新しいリクエストを追加しました").to_string();
             }
             C::CollectionNewAbove => {
                 self.commit();
                 self.collection.insert(self.selected, Request::default());
                 // select() は同じ index だと何もしないので直接読み込む
                 self.load_selected();
-                self.status = "新しいリクエストを追加しました".to_string();
+                self.status =
+                    t!("Added a new request", "新しいリクエストを追加しました").to_string();
             }
             C::CollectionYank => {
                 self.commit();
                 self.request_register = Some(self.collection[self.selected].clone());
-                self.status = format!(
-                    "「{}」をヤンクしました (p で貼り付け)",
-                    self.collection[self.selected].name
+                self.status = tf!(
+                    "Yanked \"{name}\" (p to paste)",
+                    "「{name}」をヤンクしました (p で貼り付け)",
+                    name = self.collection[self.selected].name
                 );
             }
             C::CollectionDelete => {
@@ -1097,12 +1105,20 @@ impl App {
                 }
                 self.selected = self.selected.min(self.collection.len() - 1);
                 self.load_selected();
-                self.status = format!("「{}」を削除しました (p で貼り付け)", removed.name);
+                self.status = tf!(
+                    "Deleted \"{name}\" (p to paste)",
+                    "「{name}」を削除しました (p で貼り付け)",
+                    name = removed.name
+                );
                 self.request_register = Some(removed);
             }
             C::CollectionPasteAfter | C::CollectionPasteBefore => {
                 let Some(mut req) = self.request_register.clone() else {
-                    self.status = "ヤンクしたリクエストがありません (yy でヤンク)".to_string();
+                    self.status = t!(
+                        "No yanked request (yy to yank)",
+                        "ヤンクしたリクエストがありません (yy でヤンク)"
+                    )
+                    .to_string();
                     return Action::None;
                 };
                 self.commit();
@@ -1117,7 +1133,7 @@ impl App {
                 self.collection.insert(at, req);
                 self.selected = at;
                 self.load_selected();
-                self.status = "リクエストを貼り付けました".to_string();
+                self.status = t!("Pasted the request", "リクエストを貼り付けました").to_string();
             }
             C::CollectionRename => {
                 self.back_to_normal();
@@ -1243,7 +1259,7 @@ impl App {
 
     fn send(&mut self) -> Action {
         if self.is_loading() {
-            self.status = "送信中です…".to_string();
+            self.status = t!("Already sending…", "送信中です…").to_string();
             return Action::None;
         }
         if self.mode == Mode::Visual {
@@ -1257,7 +1273,12 @@ impl App {
         }
         self.response = ResponseState::Loading;
         self.response_scroll = 0;
-        self.status = format!("{} {} を送信中…", req.method, req.url);
+        self.status = tf!(
+            "Sending {method} {url}…",
+            "{method} {url} を送信中…",
+            method = req.method,
+            url = req.url
+        );
         Action::Send(req)
     }
 
@@ -1343,10 +1364,14 @@ impl App {
     fn toggle_zoom(&mut self) {
         self.zoomed = !self.zoomed;
         self.status = if self.zoomed {
-            "全画面表示 (Shift+Esc / Ctrl+W z で戻る)".to_string()
+            t!(
+                "Zoomed (Shift+Esc / Ctrl+W z to restore)",
+                "全画面表示 (Shift+Esc / Ctrl+W z で戻る)"
+            )
         } else {
-            "全画面表示を解除しました".to_string()
-        };
+            t!("Zoom restored", "全画面表示を解除しました")
+        }
+        .to_string();
     }
 
     fn set_focus(&mut self, focus: Focus) {
@@ -1397,7 +1422,7 @@ impl App {
             }
             "config" | "keymap" => Action::EditConfig,
             _ => {
-                self.status = format!("不明なコマンド: :{cmd}");
+                self.status = tf!("Unknown command: :{cmd}", "不明なコマンド: :{cmd}");
                 Action::None
             }
         }
@@ -1495,18 +1520,22 @@ impl App {
     fn copy_register(&mut self) {
         let text = &self.register.text;
         if text.is_empty() {
-            self.status = "コピーする文字がありません".to_string();
+            self.status = t!("Nothing to copy", "コピーする文字がありません").to_string();
             return;
         }
         self.status = if self.register.linewise {
-            format!(
-                "{} 行をクリップボードにコピーしました",
-                text.split('\n').count()
+            let n = text.split('\n').count();
+            let s = if n == 1 { "" } else { "s" };
+            tf!(
+                "Copied {n} line{s} to the clipboard",
+                "{n} 行をクリップボードにコピーしました"
             )
         } else {
-            format!(
-                "{} 文字をクリップボードにコピーしました",
-                text.chars().count()
+            let n = text.chars().count();
+            let s = if n == 1 { "" } else { "s" };
+            tf!(
+                "Copied {n} character{s} to the clipboard",
+                "{n} 文字をクリップボードにコピーしました"
             )
         };
         self.clipboard = Some(text.clone());
@@ -1701,7 +1730,7 @@ impl App {
             }
             C::VimUndo => {
                 if !ed.undo() {
-                    self.status = "これ以上元に戻せません".to_string();
+                    self.status = t!("Nothing more to undo", "これ以上元に戻せません").to_string();
                 }
                 self.commit();
                 return;
@@ -2498,7 +2527,7 @@ mod tests {
 
         type_str(&mut app, ":foo");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
-        assert!(app.status.contains("不明なコマンド"));
+        assert!(app.status.contains("Unknown command"));
 
         // Esc / 空での Backspace でキャンセル
         type_str(&mut app, ":q");
@@ -2546,7 +2575,7 @@ mod tests {
             url: "http://a".into(),
             ..Default::default()
         }]);
-        app.set_keymap(crate::config::parse(config).unwrap());
+        app.set_keymap(crate::config::parse(config).unwrap().keymap);
         app
     }
 
@@ -2655,7 +2684,7 @@ mod tests {
         assert_eq!(copied(action), "world");
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.response_body_view.cursor(), (0, 6));
-        assert!(app.status.contains("5 文字"));
+        assert!(app.status.contains("5 characters"));
 
         // 行単位: V j で 2 行
         type_str(&mut app, "Vj");

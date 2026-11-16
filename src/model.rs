@@ -124,15 +124,19 @@ impl Request {
     pub fn full_url(&self) -> anyhow::Result<reqwest::Url> {
         let raw = self.url.trim();
         if raw.is_empty() {
-            anyhow::bail!("URL が空です");
+            anyhow::bail!(crate::t!("The URL is empty", "URL が空です"));
         }
         let with_scheme = if raw.contains("://") {
             raw.to_string()
         } else {
             format!("http://{raw}")
         };
-        let mut url = reqwest::Url::parse(&with_scheme)
-            .map_err(|e| anyhow::anyhow!("URL が不正です ({e}): {raw}"))?;
+        let mut url = reqwest::Url::parse(&with_scheme).map_err(|e| {
+            anyhow::anyhow!(crate::tf!(
+                "Invalid URL ({e}): {raw}",
+                "URL が不正です ({e}): {raw}"
+            ))
+        })?;
         let enabled: Vec<_> = self
             .params
             .iter()

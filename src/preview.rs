@@ -119,8 +119,10 @@ pub async fn render(browser: &Path, job: &Job) -> anyhow::Result<Rendered> {
     let dir = TempDir::new()?;
     let html_path = dir.path().join("page.html");
     let png_path = dir.path().join("page.png");
-    std::fs::write(&html_path, inject_base(&job.html, &job.base_url))
-        .context("一時ファイルの作成に失敗しました")?;
+    std::fs::write(&html_path, inject_base(&job.html, &job.base_url)).context(crate::t!(
+        "failed to create a temporary file",
+        "一時ファイルの作成に失敗しました"
+    ))?;
 
     let (css_w, css_h) = job.window_size();
     let mut cmd = tokio::process::Command::new(browser);
@@ -153,12 +155,19 @@ pub async fn render(browser: &Path, job: &Job) -> anyhow::Result<Rendered> {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("ブラウザを起動できません: {}", browser.display()))?;
+    let child = cmd.spawn().with_context(|| {
+        crate::tf!(
+            "cannot launch the browser: {p}",
+            "ブラウザを起動できません: {p}",
+            p = browser.display()
+        )
+    })?;
     let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
         .await
-        .context("ブラウザでの描画がタイムアウトしました")??;
+        .context(crate::t!(
+            "rendering in the browser timed out",
+            "ブラウザでの描画がタイムアウトしました"
+        ))??;
     if !png_path.is_file() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let last = stderr
@@ -166,9 +175,16 @@ pub async fn render(browser: &Path, job: &Job) -> anyhow::Result<Rendered> {
             .rev()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("");
-        bail!("ブラウザでの描画に失敗しました ({}): {last}", output.status);
+        bail!(crate::tf!(
+            "rendering in the browser failed ({status}): {last}",
+            "ブラウザでの描画に失敗しました ({status}): {last}",
+            status = output.status
+        ));
     }
-    let png = std::fs::read(&png_path).context("スクリーンショットを読めません")?;
+    let png = std::fs::read(&png_path).context(crate::t!(
+        "cannot read the screenshot",
+        "スクリーンショットを読めません"
+    ))?;
     let (width, height) = content_size(&png)?;
     Ok(Rendered { png, width, height })
 }
@@ -207,11 +223,18 @@ fn running_as_root() -> bool {
 pub fn content_size(png: &[u8]) -> anyhow::Result<(u32, u32)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().context("PNG を解析できません")?;
-    let mut buf = vec![0; reader.output_buffer_size().context("PNG が大きすぎます")?];
+    let mut reader = decoder
+        .read_info()
+        .context(crate::t!("cannot parse the PNG", "PNG を解析できません"))?;
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .context(crate::t!("the PNG is too large", "PNG が大きすぎます"))?
+    ];
     let info = reader
         .next_frame(&mut buf)
-        .context("PNG を展開できません")?;
+        .context(crate::t!("cannot decode the PNG", "PNG を展開できません"))?;
     let (w, h) = (info.width, info.height);
     if w == 0 || h == 0 {
         return Ok((w, h));
@@ -245,7 +268,10 @@ impl TempDir {
             SEQ.fetch_add(1, Ordering::Relaxed)
         );
         let path = std::env::temp_dir().join(name);
-        std::fs::create_dir_all(&path).context("一時ディレクトリの作成に失敗しました")?;
+        std::fs::create_dir_all(&path).context(crate::t!(
+            "failed to create a temporary directory",
+            "一時ディレクトリの作成に失敗しました"
+        ))?;
         Ok(Self(path))
     }
 

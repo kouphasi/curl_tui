@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow};
 use serde::Deserialize;
 
+use crate::i18n::{self, Lang};
 use crate::keymap::{Command, Ctx, DEFAULTS, Keymap, Section};
+use crate::{t, tf};
 
 /// 設定ファイルの場所: `$CURL_TUI_CONFIG` → `$XDG_CONFIG_HOME/curl_tui/config.jsonc`
 /// → `~/.config/curl_tui/config.jsonc`。
@@ -26,6 +28,8 @@ pub fn default_path() -> PathBuf {
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     #[serde(default)]
+    lang: Option<String>,
+    #[serde(default)]
     keymap: Vec<SectionFile>,
 }
 
@@ -38,23 +42,54 @@ struct SectionFile {
     bindings: BTreeMap<String, Option<String>>,
 }
 
-/// 設定ファイルを読む。ファイルが無ければ既定のキーマップを返す。
-pub fn load(path: &Path) -> anyhow::Result<Keymap> {
+/// 設定ファイルの内容。
+#[derive(Debug, Default)]
+pub struct Config {
+    /// 表示言語 (`"lang"`)。省略時は英語。
+    pub lang: Lang,
+    pub keymap: Keymap,
+}
+
+/// 設定ファイルを読む。ファイルが無ければ既定の設定を返す。
+pub fn load(path: &Path) -> anyhow::Result<Config> {
     if !path.exists() {
-        return Ok(Keymap::default());
+        return Ok(Config::default());
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("{} を読み込めません", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| cannot_read(path))?;
     parse(&text)
 }
 
-/// JSONC の設定からキーマップを作る。
-pub fn parse(text: &str) -> anyhow::Result<Keymap> {
+/// 設定ファイルの `"lang"` だけを読む。ファイルが無い・壊れている・`"lang"` が無い
+/// (または不正な) ときは `None`。他の設定にエラーがあっても、そのエラーを指定された
+/// 言語で表示できるようにするためのもの。
+pub fn peek_lang(path: &Path) -> Option<Lang> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&strip_jsonc(&text)).ok()?;
+    Lang::from_code(value.get("lang")?.as_str()?)
+}
+
+/// JSONC の設定を解釈する。
+pub fn parse(text: &str) -> anyhow::Result<Config> {
     let json = strip_jsonc(text);
     if json.trim().is_empty() {
-        return Ok(Keymap::default());
+        return Ok(Config::default());
     }
-    let file: ConfigFile = serde_json::from_str(&json).context("JSON が不正です")?;
+    let file: ConfigFile =
+        serde_json::from_str(&json).context(t!("invalid JSON", "JSON が不正です"))?;
+    let lang = match file.lang.as_deref() {
+        None => Lang::default(),
+        Some(code) => Lang::from_code(code).ok_or_else(|| {
+            let codes: Vec<String> = Lang::ALL
+                .iter()
+                .map(|l| format!("\"{}\"", l.code()))
+                .collect();
+            let codes = codes.join(" / ");
+            anyhow!(tf!(
+                "unknown \"lang\" \"{code}\" (available: {codes})",
+                "不明な \"lang\" \"{code}\" (使える値: {codes})"
+            ))
+        })?,
+    };
     let sections: Vec<Section> = file
         .keymap
         .into_iter()
@@ -63,7 +98,8 @@ pub fn parse(text: &str) -> anyhow::Result<Keymap> {
             bindings: s.bindings.into_iter().collect(),
         })
         .collect();
-    Keymap::with_user(&sections).map_err(|e| anyhow!(e))
+    let keymap = Keymap::with_user(&sections).map_err(|e| anyhow!(e))?;
+    Ok(Config { lang, keymap })
 }
 
 /// コメント (`//` と `/* */`) と末尾カンマを空白に置き換えて、普通の JSON にする。
@@ -126,8 +162,28 @@ pub fn strip_jsonc(text: &str) -> String {
     out.into_iter().collect()
 }
 
-const REFERENCE_BEGIN: &str = "// ==== リファレンス (自動生成) ====";
-const REFERENCE_END: &str = "// ==== リファレンスここまで ====";
+/// リファレンスの始まりと終わりの目印 (英語, 日本語)。どちらの言語で書かれた
+/// ファイルでも見つけられるよう、両方を探す。
+const REFERENCE_BEGIN: [&str; 2] = [
+    "// ==== Reference (auto-generated) ====",
+    "// ==== リファレンス (自動生成) ====",
+];
+const REFERENCE_END: [&str; 2] = [
+    "// ==== End of reference ====",
+    "// ==== リファレンスここまで ====",
+];
+
+fn marker(markers: [&'static str; 2]) -> &'static str {
+    t!(markers[0], markers[1])
+}
+
+/// 最初に現れる目印の (位置, 長さ)。
+fn find_marker(text: &str, markers: [&str; 2]) -> Option<(usize, usize)> {
+    markers
+        .iter()
+        .filter_map(|m| text.find(m).map(|at| (at, m.len())))
+        .min()
+}
 
 /// エディタで開く前の準備。ファイルが無ければ雛形を作り、あればリファレンスの
 /// コメント部分だけを最新の内容に更新する (目印の行が無ければ何も変えない)。
@@ -135,7 +191,7 @@ pub fn prepare(path: &Path) -> anyhow::Result<()> {
     let current = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e).with_context(|| format!("{} を読み込めません", path.display())),
+        Err(e) => return Err(e).with_context(|| cannot_read(path)),
     };
     let updated = if current.trim().is_empty() {
         template()
@@ -148,27 +204,81 @@ pub fn prepare(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("{} を作成できません", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            tf!(
+                "cannot create {p}",
+                "{p} を作成できません",
+                p = parent.display()
+            )
+        })?;
     }
-    std::fs::write(path, updated).with_context(|| format!("{} に書き込めません", path.display()))
+    std::fs::write(path, updated).with_context(|| {
+        tf!(
+            "cannot write to {p}",
+            "{p} に書き込めません",
+            p = path.display()
+        )
+    })
+}
+
+fn cannot_read(path: &Path) -> String {
+    tf!(
+        "cannot read {p}",
+        "{p} を読み込めません",
+        p = path.display()
+    )
 }
 
 fn refresh_reference(text: &str) -> String {
-    let Some(begin) = text.find(REFERENCE_BEGIN) else {
+    let Some((begin, _)) = find_marker(text, REFERENCE_BEGIN) else {
         return text.to_string();
     };
-    let Some(end) = text[begin..].find(REFERENCE_END) else {
+    let Some((end, len)) = find_marker(&text[begin..], REFERENCE_END) else {
         return text.to_string();
     };
-    let end = begin + end + REFERENCE_END.len();
+    let end = begin + end + len;
     format!("{}{}{}", &text[..begin], reference(), &text[end..])
 }
 
-/// 新しく作る設定ファイルの内容。
+/// 新しく作る設定ファイルの内容 (現在の表示言語で書く)。
 pub fn template() -> String {
-    format!(
+    tf!(
+        r#"// curl_tui config file (JSONC: comments and trailing commas are allowed)
+//
+// "lang" is the display language: "en" (English, default) or "ja" (Japanese).
+//
+// Key bindings in "keymap" are added on top of (and override) the defaults.
+//   "context"  : where the bindings are active. Omit it to make them active everywhere
+//   "bindings" : {{ "key": "command name" }}. Use null to disable a key
+// When several bindings match the same key, the one written later wins.
+// Changes take effect as soon as you save and quit the editor.
+//
+// Key syntax, contexts, commands and the default key bindings are listed in
+// the second half of this file (the reference).
+{{
+  "lang": "{lang}",
+  "keymap": [
+    // Examples: remove the leading // to enable them
+    // {{
+    //   "context": "Normal",
+    //   "bindings": {{
+    //     "ctrl-g": "app::Send",        // Ctrl+G also sends
+    //     "space w": "app::Save",       // Space then w saves
+    //     "q": null                     // q no longer quits
+    //   }}
+    // }},
+    // {{
+    //   "context": "Insert",
+    //   "bindings": {{ "j k": "vim::NormalMode" }}   // jk returns to Normal mode
+    // }}
+  ]
+}}
+
+{reference}
+"#,
         r#"// curl_tui の設定ファイル (JSONC: コメントと末尾のカンマが使えます)
+//
+// "lang" は表示言語です: "en" (英語、既定) または "ja" (日本語)。
 //
 // "keymap" にキーバインドを書くと、既定のキーバインドに追加・上書きされます。
 //   "context"  : そのバインドが有効になる環境。省略するとどこでも有効です
@@ -179,6 +289,7 @@ pub fn template() -> String {
 // キーの書き方・コンテキスト・コマンドと既定のキーバインドの一覧は、
 // このファイルの後半 (リファレンス) にあります。
 {{
+  "lang": "{lang}",
   "keymap": [
     // 例: 先頭の // を外すと有効になります
     // {{
@@ -196,15 +307,16 @@ pub fn template() -> String {
   ]
 }}
 
-{}
+{reference}
 "#,
-        reference()
+        lang = i18n::current().code(),
+        reference = reference()
     )
 }
 
 /// コンテキスト・コマンド・既定のキーバインドの一覧 (すべてコメント)。
 pub fn reference() -> String {
-    let mut lines = vec![REFERENCE_BEGIN.to_string()];
+    let mut lines = vec![marker(REFERENCE_BEGIN).to_string()];
     let mut line = |s: &str| {
         lines.push(if s.is_empty() {
             "//".to_string()
@@ -212,29 +324,65 @@ pub fn reference() -> String {
             format!("// {s}")
         })
     };
-    line("ここから「リファレンスここまで」の行までは、:config で開くたびに最新の内容に");
-    line("書き直されます。自分の設定は上の \"keymap\" に書いてください。");
+    line(t!(
+        "Everything from here to the \"End of reference\" line is rewritten with the latest",
+        "ここから「リファレンスここまで」の行までは、:config で開くたびに最新の内容に"
+    ));
+    line(t!(
+        "content every time you open :config. Put your own settings in \"keymap\" above.",
+        "書き直されます。自分の設定は上の \"keymap\" に書いてください。"
+    ));
     line("");
-    line("■ キーの書き方");
-    line("  修飾キーは前に付けます : \"ctrl-r\" \"alt-x\" \"shift-g\" \"ctrl-shift-up\"");
-    line("  続けて押すキーは空白で : \"g g\" \"ctrl-w h\" \"space w\"");
-    line("  記号はそのまま書きます : \"?\" \"$\" \":\" (shift- は付けません)");
-    line("  特殊キー               : enter escape tab backspace delete space insert");
-    line("                           up down left right home end pageup pagedown f1〜f12");
+    line(t!("■ Key syntax", "■ キーの書き方"));
+    line(t!(
+        "  Modifiers go first        : \"ctrl-r\" \"alt-x\" \"shift-g\" \"ctrl-shift-up\"",
+        "  修飾キーは前に付けます : \"ctrl-r\" \"alt-x\" \"shift-g\" \"ctrl-shift-up\""
+    ));
+    line(t!(
+        "  Key sequences use spaces  : \"g g\" \"ctrl-w h\" \"space w\"",
+        "  続けて押すキーは空白で : \"g g\" \"ctrl-w h\" \"space w\""
+    ));
+    line(t!(
+        "  Symbols are written as is : \"?\" \"$\" \":\" (no shift-)",
+        "  記号はそのまま書きます : \"?\" \"$\" \":\" (shift- は付けません)"
+    ));
+    line(t!(
+        "  Special keys              : enter escape tab backspace delete space insert",
+        "  特殊キー               : enter escape tab backspace delete space insert"
+    ));
+    line(t!(
+        "                              up down left right home end pageup pagedown f1-f12",
+        "                           up down left right home end pageup pagedown f1〜f12"
+    ));
     line("");
-    line("■ コンテキスト (\"context\" に書ける名前。&& || ! ( ) で組み合わせられます)");
+    line(t!(
+        "■ Contexts (names usable in \"context\"; combine them with && || ! ( ))",
+        "■ コンテキスト (\"context\" に書ける名前。&& || ! ( ) で組み合わせられます)"
+    ));
     for ctx in Ctx::ALL {
         line(&format!("  {:<11}{}", ctx.name(), ctx.description()));
     }
-    line("  例: \"Normal && Collection\"  \"Insert && !Url\"  \"Normal && (Url || Request)\"");
+    line(t!(
+        "  e.g. \"Normal && Collection\"  \"Insert && !Url\"  \"Normal && (Url || Request)\"",
+        "  例: \"Normal && Collection\"  \"Insert && !Url\"  \"Normal && (Url || Request)\""
+    ));
     line("");
-    line("■ 既定のキーバインド (\"キー\": \"コマンド名\", // 動作)");
-    line("  d / c / y (オペレータ) の後は、(モーション) のコマンドに割り当てたキーが使えます。");
+    line(t!(
+        "■ Default key bindings (\"key\": \"command name\", // what it does)",
+        "■ 既定のキーバインド (\"キー\": \"コマンド名\", // 動作)"
+    ));
+    line(t!(
+        "  After d / c / y (operators), keys bound to (motion) commands can be used.",
+        "  d / c / y (オペレータ) の後は、(モーション) のコマンドに割り当てたキーが使えます。"
+    ));
     line("[");
     for (context, bindings) in DEFAULTS {
         line("  {");
         if context.is_empty() {
-            line("    // \"context\" なし: どこでも有効");
+            line(t!(
+                "    // no \"context\": active everywhere",
+                "    // \"context\" なし: どこでも有効"
+            ));
         } else {
             line(&format!("    \"context\": \"{context}\","));
         }
@@ -262,7 +410,10 @@ pub fn reference() -> String {
         .collect();
     if !unbound.is_empty() {
         line("");
-        line("■ 既定ではキーが割り当てられていないコマンド");
+        line(t!(
+            "■ Commands with no default key binding",
+            "■ 既定ではキーが割り当てられていないコマンド"
+        ));
         for command in unbound {
             line(&format!(
                 "  {:<24}{}",
@@ -272,9 +423,12 @@ pub fn reference() -> String {
         }
     }
     line("");
-    line("■ : コマンド");
-    line("  :w 保存  :q 終了  :wq 保存して終了  :send 送信  :help ヘルプ  :config この設定を開く");
-    lines.push(REFERENCE_END.to_string());
+    line(t!("■ : commands", "■ : コマンド"));
+    line(t!(
+        "  :w save  :q quit  :wq save and quit  :send send  :help help  :config open this file",
+        "  :w 保存  :q 終了  :wq 保存して終了  :send 送信  :help ヘルプ  :config この設定を開く"
+    ));
+    lines.push(marker(REFERENCE_END).to_string());
     lines.join("\n")
 }
 
@@ -319,7 +473,7 @@ mod tests {
     #[test]
     fn template_is_valid_and_changes_nothing() {
         let text = template();
-        let km = parse(&text).unwrap();
+        let km = parse(&text).unwrap().keymap;
         assert_eq!(km.user_count(), 0);
         // 全コマンドと全コンテキストが載っている
         for command in Command::ALL {
@@ -340,7 +494,7 @@ mod tests {
             .lines()
             .map(|l| l.strip_prefix("// ").unwrap_or("").to_string() + "\n")
             .collect();
-        let km = parse(&format!("{{ \"keymap\": {body} }}")).unwrap();
+        let km = parse(&format!("{{ \"keymap\": {body} }}")).unwrap().keymap;
         let count: usize = DEFAULTS.iter().map(|(_, b)| b.len()).sum();
         assert_eq!(km.user_count(), count);
     }
@@ -355,7 +509,8 @@ mod tests {
   ],
 }"#,
         )
-        .unwrap();
+        .unwrap()
+        .keymap;
         let normal = ContextSet::default().with(Ctx::Normal);
         assert_eq!(km.lookup(normal, &parse_keys("q").unwrap()), Lookup::None);
         assert!(matches!(
@@ -372,27 +527,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_lang() {
+        assert_eq!(parse("{}").unwrap().lang, Lang::En);
+        assert_eq!(parse(r#"{ "lang": "en" }"#).unwrap().lang, Lang::En);
+        assert_eq!(parse(r#"{ "lang": "ja", }"#).unwrap().lang, Lang::Ja);
+        let err = parse(r#"{ "lang": "fr" }"#).unwrap_err().to_string();
+        assert!(err.contains("\"fr\"") && err.contains("\"ja\""), "{err}");
+        assert!(parse(r#"{ "lang": 1 }"#).is_err());
+    }
+
+    #[test]
+    fn peeks_lang_even_when_the_rest_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.jsonc");
+        assert_eq!(peek_lang(&path), None);
+        std::fs::write(
+            &path,
+            r#"{ "lang": "ja", "keymap": [ { "bindings": { "x": "nope" } } ] } // c"#,
+        )
+        .unwrap();
+        assert!(load(&path).is_err());
+        assert_eq!(peek_lang(&path), Some(Lang::Ja));
+        std::fs::write(&path, r#"{ "lang": "fr" }"#).unwrap();
+        assert_eq!(peek_lang(&path), None);
+        std::fs::write(&path, "{ \"lang\": \"ja\"").unwrap();
+        assert_eq!(peek_lang(&path), None);
+    }
+
+    #[test]
     fn errors_are_reported() {
         assert!(parse("{ \"keymap\": [ { \"bindings\": { \"x\": \"nope\" } } ] }").is_err());
         assert!(parse("{ \"keymap\": [ { \"context\": \"Nope\" } ] }").is_err());
         assert!(parse("{ \"keymaps\": [] }").is_err());
         assert!(parse("{ \"keymap\": [").is_err());
         // 空 / コメントだけのファイルは既定のまま
-        assert_eq!(parse("").unwrap().user_count(), 0);
-        assert_eq!(parse("// nothing\n").unwrap().user_count(), 0);
+        assert_eq!(parse("").unwrap().keymap.user_count(), 0);
+        assert_eq!(parse("// nothing\n").unwrap().keymap.user_count(), 0);
     }
 
     #[test]
     fn prepare_creates_template_and_refreshes_reference() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/config.jsonc");
-        assert_eq!(load(&path).unwrap().user_count(), 0);
+        assert_eq!(load(&path).unwrap().keymap.user_count(), 0);
         prepare(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), template());
 
         // 古いリファレンスは書き直し、ユーザーの設定はそのまま残す
         let user = "{ \"keymap\": [ { \"bindings\": { \"f2\": \"app::Save\" } } ] }\n";
-        let stale = format!("{user}{REFERENCE_BEGIN}\n// old\n{REFERENCE_END}\n// mine\n");
+        // 目印はどちらの言語のものでも見つける
+        for i in 0..2 {
+            let (begin, end) = (REFERENCE_BEGIN[i], REFERENCE_END[i]);
+            let stale = format!("{user}{begin}\n// old\n{end}\n// mine\n");
+            assert_eq!(
+                refresh_reference(&stale),
+                format!("{user}{}\n// mine\n", reference())
+            );
+        }
+        let (begin, end) = (REFERENCE_BEGIN[1], REFERENCE_END[0]);
+        let stale = format!("{user}{begin}\n// old\n{end}\n// mine\n");
         std::fs::write(&path, &stale).unwrap();
         prepare(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -400,7 +593,7 @@ mod tests {
         assert!(text.ends_with("\n// mine\n"));
         assert!(!text.contains("// old"));
         assert!(text.contains("app::Quit"));
-        assert_eq!(load(&path).unwrap().user_count(), 1);
+        assert_eq!(load(&path).unwrap().keymap.user_count(), 1);
 
         // 目印が無いファイルには触らない
         std::fs::write(&path, user).unwrap();

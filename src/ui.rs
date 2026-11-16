@@ -14,6 +14,7 @@ use crate::app::{
 };
 use crate::editor::TextEditor;
 use crate::model::{HttpMethod, format_size};
+use crate::{t, tf};
 
 pub fn method_color(m: HttpMethod) -> Color {
     match m {
@@ -142,68 +143,74 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
     let editor_focused = editor_focused(app);
-    let hints: &[(&str, &str)] = match (app.mode, app.focus) {
+    let hints: &[(&str, &str, &str)] = match (app.mode, app.focus) {
         (Mode::Editing, _) => &[
-            ("Esc", "Normal へ"),
-            ("Ctrl+W", "単語削除"),
-            ("Ctrl+R", "送信"),
+            ("Esc", "Normal", "Normal へ"),
+            ("Ctrl+W", "Del word", "単語削除"),
+            ("Ctrl+R", "Send", "送信"),
         ],
         (Mode::Visual, _) => &[
-            ("hjkl/w/b/e", "範囲"),
-            ("y", "コピー"),
-            ("v/V", "文字/行"),
-            ("Esc", "解除"),
+            ("hjkl/w/b/e", "Extend", "範囲"),
+            ("y", "Copy", "コピー"),
+            ("v/V", "Char/Line", "文字/行"),
+            ("Esc", "Cancel", "解除"),
         ],
-        (Mode::Rename, _) => &[("Enter", "確定"), ("Esc", "キャンセル")],
+        (Mode::Rename, _) => &[
+            ("Enter", "Confirm", "確定"),
+            ("Esc", "Cancel", "キャンセル"),
+        ],
         (_, Focus::Collection) => &[
-            ("j/k", "選択"),
-            ("o", "新規"),
-            ("yy/p", "複製"),
-            ("dd", "削除"),
-            ("r", "名前変更"),
-            (":w", "保存"),
+            ("j/k", "Select", "選択"),
+            ("o", "New", "新規"),
+            ("yy/p", "Duplicate", "複製"),
+            ("dd", "Delete", "削除"),
+            ("r", "Rename", "名前変更"),
+            (":w", "Save", "保存"),
         ],
         (_, Focus::Url) => &[
-            ("i/a/A", "挿入"),
-            ("hjkl/w/b", "移動"),
-            ("m/M", "メソッド"),
-            ("Ctrl+R", "送信"),
+            ("i/a/A", "Insert", "挿入"),
+            ("hjkl/w/b", "Move", "移動"),
+            ("m/M", "Method", "メソッド"),
+            ("Ctrl+R", "Send", "送信"),
         ],
         (_, Focus::Request) if editor_focused => &[
-            ("i/a/o", "挿入"),
-            ("dd/x/p/u", "編集"),
-            ("H/L", "タブ"),
-            ("Ctrl+R", "送信"),
+            ("i/a/o", "Insert", "挿入"),
+            ("dd/x/p/u", "Edit", "編集"),
+            ("H/L", "Tabs", "タブ"),
+            ("Ctrl+R", "Send", "送信"),
         ],
         (_, Focus::Request) => &[
-            ("v/V", "選択"),
-            ("y", "コピー"),
-            ("H/L,1-4", "タブ"),
-            ("Ctrl+R", "送信"),
+            ("v/V", "Select", "選択"),
+            ("y", "Copy", "コピー"),
+            ("H/L,1-4", "Tabs", "タブ"),
+            ("Ctrl+R", "Send", "送信"),
         ],
         (_, Focus::Response)
             if app.response_tab == ResponseTab::Preview && app.preview_unavailable.is_none() =>
         {
             &[
-                ("j/k", "スクロール"),
-                ("+/-/0", "拡大/縮小/リセット"),
-                ("gg/G", "先頭/末尾"),
-                ("H/L", "タブ"),
+                ("j/k", "Scroll", "スクロール"),
+                ("+/-/0", "Zoom in/out/reset", "拡大/縮小/リセット"),
+                ("gg/G", "Top/Bottom", "先頭/末尾"),
+                ("H/L", "Tabs", "タブ"),
             ]
         }
         (_, Focus::Response) => &[
-            ("hjkl/w/b", "移動"),
-            ("v/V", "選択"),
-            ("y", "コピー"),
-            ("Ctrl+D/U", "半ページ"),
-            ("H/L", "タブ"),
+            ("hjkl/w/b", "Move", "移動"),
+            ("v/V", "Select", "選択"),
+            ("y", "Copy", "コピー"),
+            ("Ctrl+D/U", "Half page", "半ページ"),
+            ("H/L", "Tabs", "タブ"),
         ],
     };
     let mut spans = Vec::new();
-    for (k, desc) in hints
-        .iter()
-        .chain([("Ctrl+HJKL", "ペイン移動"), ("?", "ヘルプ"), (":q", "終了")].iter())
-    {
+    let common = [
+        ("Ctrl+HJKL", "Panes", "ペイン移動"),
+        ("?", "Help", "ヘルプ"),
+        (":q", "Quit", "終了"),
+    ];
+    for (k, en, ja) in hints.iter().chain(common.iter()) {
+        let desc = t!(en, ja);
         // 背景色に依存せず、どのテーマでも読みやすいよう前景色のみで強調する
         spans.push(Span::raw(format!(" {k}")).fg(Color::Cyan).bold());
         spans.push(Span::raw(format!(" {desc}  ")).fg(Color::Gray));
@@ -321,7 +328,10 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
             body_area,
             editing,
             sel,
-            "key=value  (1 行 1 件 / # で無効化)",
+            t!(
+                "key=value  (one per line / # to disable)",
+                "key=value  (1 行 1 件 / # で無効化)"
+            ),
         )),
         RequestTab::Headers => Some(draw_editor(
             frame,
@@ -330,7 +340,10 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
             body_area,
             editing,
             sel,
-            "Header-Name: value  (1 行 1 件 / # で無効化)",
+            t!(
+                "Header-Name: value  (one per line / # to disable)",
+                "Header-Name: value  (1 行 1 件 / # で無効化)"
+            ),
         )),
         RequestTab::Body => Some(draw_editor(
             frame,
@@ -339,7 +352,7 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
             body_area,
             editing,
             sel,
-            "リクエストボディ",
+            t!("Request body", "リクエストボディ"),
         )),
         RequestTab::Curl => Some(draw_view(
             frame,
@@ -572,15 +585,22 @@ fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
 
     match &app.response {
         ResponseState::Empty => frame.render_widget(
-            Paragraph::new("Ctrl+R (または F5) でリクエストを送信")
-                .fg(Color::DarkGray)
-                .centered(),
+            Paragraph::new(t!(
+                "Press Ctrl+R (or F5) to send the request",
+                "Ctrl+R (または F5) でリクエストを送信"
+            ))
+            .fg(Color::DarkGray)
+            .centered(),
             inner,
         ),
         ResponseState::Loading => frame.render_widget(
-            Paragraph::new(format!("{} 送信中…", SPINNER[app.spinner]))
-                .fg(Color::Yellow)
-                .centered(),
+            Paragraph::new(tf!(
+                "{spinner} Sending…",
+                "{spinner} 送信中…",
+                spinner = SPINNER[app.spinner]
+            ))
+            .fg(Color::Yellow)
+            .centered(),
             inner,
         ),
         ResponseState::Failed(e) => frame.render_widget(
@@ -643,8 +663,16 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(reason) = &app.preview_unavailable {
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(format!("プレビューを表示できません: {reason}")).fg(Color::Yellow),
-                Line::from("HTML のソースは Body タブで確認できます").fg(Color::DarkGray),
+                Line::from(tf!(
+                    "Preview is unavailable: {reason}",
+                    "プレビューを表示できません: {reason}"
+                ))
+                .fg(Color::Yellow),
+                Line::from(t!(
+                    "The HTML source is available in the Body tab",
+                    "HTML のソースは Body タブで確認できます"
+                ))
+                .fg(Color::DarkGray),
             ])
             .wrap(Wrap { trim: false }),
             area,
@@ -655,11 +683,13 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
     app.preview_area.set(Some(area));
     let msg = match &app.preview {
         PreviewState::Ready { .. } => return,
-        PreviewState::Idle | PreviewState::Rendering => {
-            Paragraph::new(format!("{} ブラウザで描画中…", SPINNER[app.spinner]))
-                .fg(Color::Yellow)
-                .centered()
-        }
+        PreviewState::Idle | PreviewState::Rendering => Paragraph::new(tf!(
+            "{spinner} Rendering in the browser…",
+            "{spinner} ブラウザで描画中…",
+            spinner = SPINNER[app.spinner]
+        ))
+        .fg(Color::Yellow)
+        .centered(),
         PreviewState::Failed(e) => Paragraph::new(e.as_str())
             .fg(Color::Red)
             .wrap(Wrap { trim: false }),
@@ -678,55 +708,154 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn draw_help(frame: &mut Frame) {
-    let rows: &[(&str, &str)] = &[
-        ("Ctrl+H/J/K/L", "ペイン移動 (左 / 下 / 上 / 右)"),
-        ("Ctrl+W h/j/k/l/w", "ペイン移動 (Vim のウィンドウ操作)"),
+    // (キー, キー (日本語。同じなら空), 英語の説明, 日本語の説明)
+    let rows: &[(&str, &str, &str, &str)] = &[
+        (
+            "Ctrl+H/J/K/L",
+            "",
+            "Move between panes (left / down / up / right)",
+            "ペイン移動 (左 / 下 / 上 / 右)",
+        ),
+        (
+            "Ctrl+W h/j/k/l/w",
+            "",
+            "Move between panes (Vim window commands)",
+            "ペイン移動 (Vim のウィンドウ操作)",
+        ),
         (
             "Shift+Esc / Ctrl+W z",
+            "",
+            "Zoom the focused pane to full screen / restore",
             "選択中のペインを全画面表示 / 元に戻す",
         ),
-        ("Ctrl+R / F5", "リクエスト送信 (:send も可)"),
-        (":w / :q / :wq", "保存 / 終了 / 保存して終了"),
-        ("m / M", "メソッド切り替え"),
-        ("H / L, gt / gT", "タブ切り替え (1-4 で直接選択)"),
-        ("h j k l w b e", "カーソル移動 (テキスト欄)"),
-        ("0 ^ $ gg G", "行頭 / 行頭の文字 / 行末 / 先頭 / 末尾"),
-        ("i a I A o O", "Insert モードへ (Esc で Normal)"),
-        ("x X r s S D C", "文字削除 / 置換 / 行末まで削除 など"),
-        ("d c y + 移動", "dw, cw, d$, dd, cc, yy など"),
+        (
+            "Ctrl+R / F5",
+            "",
+            "Send the request (also :send)",
+            "リクエスト送信 (:send も可)",
+        ),
+        (
+            ":w / :q / :wq",
+            "",
+            "Save / quit / save and quit",
+            "保存 / 終了 / 保存して終了",
+        ),
+        ("m / M", "", "Switch the HTTP method", "メソッド切り替え"),
+        (
+            "H / L, gt / gT",
+            "",
+            "Switch tabs (1-4 to select directly)",
+            "タブ切り替え (1-4 で直接選択)",
+        ),
+        (
+            "h j k l w b e",
+            "",
+            "Move the cursor (text fields)",
+            "カーソル移動 (テキスト欄)",
+        ),
+        (
+            "0 ^ $ gg G",
+            "",
+            "Line start / first char / line end / top / bottom",
+            "行頭 / 行頭の文字 / 行末 / 先頭 / 末尾",
+        ),
+        (
+            "i a I A o O",
+            "",
+            "Enter Insert mode (Esc for Normal)",
+            "Insert モードへ (Esc で Normal)",
+        ),
+        (
+            "x X r s S D C",
+            "",
+            "Delete char / replace / delete to line end, etc.",
+            "文字削除 / 置換 / 行末まで削除 など",
+        ),
+        (
+            "d c y + motion",
+            "d c y + 移動",
+            "dw, cw, d$, dd, cc, yy, etc.",
+            "dw, cw, d$, dd, cc, yy など",
+        ),
         (
             "v / V → y",
+            "",
+            "Select and copy (also in cURL / Response)",
             "選択してクリップボードにコピー (cURL / Response でも可)",
         ),
-        ("p / P / u", "貼り付け / 前に貼り付け / 元に戻す"),
-        ("Ctrl+D/U/F/B", "レスポンスのページ送り"),
-        ("3 (Response)", "HTML のプレビュー (kitty 対応端末)"),
-        ("+ / - / 0", "(Preview) 拡大 / 縮小 / 倍率リセット"),
+        (
+            "p / P / u",
+            "",
+            "Paste after / paste before / undo",
+            "貼り付け / 前に貼り付け / 元に戻す",
+        ),
+        (
+            "Ctrl+D/U/F/B",
+            "",
+            "Page through the response",
+            "レスポンスのページ送り",
+        ),
+        (
+            "3 (Response)",
+            "",
+            "HTML preview (kitty-compatible terminals)",
+            "HTML のプレビュー (kitty 対応端末)",
+        ),
+        (
+            "+ / - / 0",
+            "",
+            "(Preview) Zoom in / zoom out / reset zoom",
+            "(Preview) 拡大 / 縮小 / 倍率リセット",
+        ),
         (
             "o / dd / yy / p / r",
+            "",
+            "(Collection) New / delete / yank / paste / rename",
             "(Collection) 新規 / 削除 / ヤンク / 貼付 / 名前変更",
         ),
-        ("Ctrl+W / Ctrl+H", "(Insert) 単語削除 / 1 文字削除"),
+        (
+            "Ctrl+W / Ctrl+H",
+            "",
+            "(Insert) Delete word / delete char",
+            "(Insert) 単語削除 / 1 文字削除",
+        ),
         (
             "Ctrl+A/E/K/U",
+            "",
+            "(Insert) Line start / end / kill to end / clear",
             "(Insert) 行頭 / 行末 / 行末まで削除 / 全消去",
         ),
         (
+            "Click / Wheel",
             "クリック / ホイール",
+            "Select pane, request, tab, cursor / scroll",
             "ペイン・リクエスト・タブ・カーソル位置の選択 / スクロール",
         ),
         (
             ":config",
+            "",
+            "Open the config file (keys above are defaults)",
             "キーバインドの設定ファイルを開く (上は既定のキー)",
         ),
-        ("q / Ctrl+C", "終了"),
+        ("q / Ctrl+C", "", "Quit", "終了"),
     ];
+    let lang = crate::i18n::current();
     let lines: Vec<Line> = rows
         .iter()
-        .map(|(k, d)| {
+        .map(|(k, k_ja, en, ja)| {
+            let k = if k_ja.is_empty() {
+                k
+            } else {
+                lang.pick(k, k_ja)
+            };
             Line::from(vec![
-                Span::raw(format!("{k:>20}  ")).fg(Color::Yellow),
-                Span::raw(*d),
+                // 全角文字を含むキーも右端がそろうよう、表示幅で詰める
+                Span::raw(format!(
+                    "{}{k}  ",
+                    " ".repeat(20usize.saturating_sub(unicode_width::UnicodeWidthStr::width(k)))
+                ))
+                .fg(Color::Yellow),
+                Span::raw(lang.pick(en, ja)),
             ])
         })
         .collect();
@@ -737,7 +866,10 @@ fn draw_help(frame: &mut Frame) {
             Block::bordered()
                 .border_type(BorderType::Thick)
                 .border_style(Style::new().fg(Color::Cyan))
-                .title(" Help (任意のキーで閉じる) "),
+                .title(t!(
+                    " Help (press any key to close) ",
+                    " Help (任意のキーで閉じる) "
+                )),
         ),
         area,
     );
@@ -749,7 +881,7 @@ fn draw_rename(frame: &mut Frame, app: &App) {
     let blk = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(Style::new().fg(Color::Magenta))
-        .title(" リクエスト名 ");
+        .title(t!(" Request name ", " リクエスト名 "));
     let _ = draw_editor(frame, &app.rename, blk, area, true, None, "");
 }
 
@@ -847,9 +979,9 @@ mod tests {
     fn renders_error_and_curl_tab() {
         let mut app = App::new(vec![]);
         app.request_tab = RequestTab::Curl;
-        app.set_response(Err("接続エラー: refused".into()));
+        app.set_response(Err("Connection error: refused".into()));
         let screen = render(&app);
-        assert!(screen.contains("接続エラー"));
+        assert!(screen.contains("Connection error"));
         assert!(screen.contains("curl"));
         assert!(screen.contains("'https://httpbin.org/get'"));
     }
@@ -860,7 +992,7 @@ mod tests {
         app.mode = Mode::Help;
         assert!(render(&app).contains("Help"));
         app.mode = Mode::Rename;
-        assert!(render(&app).contains("リクエスト名"));
+        assert!(render(&app).contains("Request name"));
     }
 
     #[test]
@@ -920,7 +1052,7 @@ mod tests {
         app.handle_key(crossterm::event::KeyEvent::from(
             crossterm::event::KeyCode::Char('3'),
         ));
-        assert!(render(&app).contains("ブラウザで描画中"));
+        assert!(render(&app).contains("Rendering in the browser"));
         assert!(app.preview_area.get().is_some());
 
         // ヘルプ表示中は画像を出さない
@@ -931,7 +1063,7 @@ mod tests {
 
         app.preview_unavailable = Some("未対応".into());
         let screen = render(&app);
-        assert!(screen.contains("プレビューを表示できません: 未対応"));
+        assert!(screen.contains("Preview is unavailable: 未対応"));
         assert_eq!(app.preview_area.get(), None);
     }
 

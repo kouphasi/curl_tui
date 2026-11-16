@@ -19,10 +19,20 @@ pub fn load(path: &Path) -> anyhow::Result<Vec<Request>> {
     if !path.exists() {
         return Ok(vec![Request::default()]);
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("{} を読み込めません", path.display()))?;
-    let requests: Vec<Request> = serde_json::from_str(&text)
-        .with_context(|| format!("{} の JSON が不正です", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| {
+        crate::tf!(
+            "cannot read {p}",
+            "{p} を読み込めません",
+            p = path.display()
+        )
+    })?;
+    let requests: Vec<Request> = serde_json::from_str(&text).with_context(|| {
+        crate::tf!(
+            "invalid JSON in {p}",
+            "{p} の JSON が不正です",
+            p = path.display()
+        )
+    })?;
     if requests.is_empty() {
         Ok(vec![Request::default()])
     } else {
@@ -34,11 +44,22 @@ pub fn save(path: &Path, requests: &[Request]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("{} を作成できません", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            crate::tf!(
+                "cannot create {p}",
+                "{p} を作成できません",
+                p = parent.display()
+            )
+        })?;
     }
     let json = serde_json::to_string_pretty(requests)?;
-    std::fs::write(path, json).with_context(|| format!("{} に書き込めません", path.display()))
+    std::fs::write(path, json).with_context(|| {
+        crate::tf!(
+            "cannot write to {p}",
+            "{p} に書き込めません",
+            p = path.display()
+        )
+    })
 }
 
 #[cfg(test)]
