@@ -8,7 +8,6 @@ use serde::Deserialize;
 
 use crate::i18n::{self, Lang};
 use crate::keymap::{Command, Ctx, DEFAULTS, Keymap, Section};
-use crate::vimrc::{self, Vimrc};
 use crate::{t, tf};
 
 /// 設定ファイルの場所: `$CURL_TUI_CONFIG` → `$XDG_CONFIG_HOME/curl_tui/config.jsonc`
@@ -32,25 +31,6 @@ struct ConfigFile {
     lang: Option<String>,
     #[serde(default)]
     keymap: Vec<SectionFile>,
-    #[serde(default)]
-    vimrc: Option<VimrcFile>,
-}
-
-/// `"vimrc"` は行の配列でも、改行を含む 1 つの文字列でもよい。
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum VimrcFile {
-    Text(String),
-    Lines(Vec<String>),
-}
-
-impl VimrcFile {
-    fn lines(&self) -> Vec<&str> {
-        match self {
-            VimrcFile::Text(text) => text.lines().collect(),
-            VimrcFile::Lines(lines) => lines.iter().map(String::as_str).collect(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,15 +48,6 @@ pub struct Config {
     /// 表示言語 (`"lang"`)。省略時は英語。
     pub lang: Lang,
     pub keymap: Keymap,
-    /// Vim 形式のキーマッピング (`"vimrc"`)
-    pub vimrc: Vimrc,
-}
-
-impl Config {
-    /// 設定ファイルで追加したキーバインドとマッピングの数。
-    pub fn user_count(&self) -> usize {
-        self.keymap.user_count() + self.vimrc.maps.len()
-    }
 }
 
 /// 設定ファイルを読む。ファイルが無ければ既定の設定を返す。
@@ -128,15 +99,7 @@ pub fn parse(text: &str) -> anyhow::Result<Config> {
         })
         .collect();
     let keymap = Keymap::with_user(&sections).map_err(|e| anyhow!(e))?;
-    let vimrc = match &file.vimrc {
-        None => Vimrc::default(),
-        Some(v) => vimrc::parse(&v.lines()).map_err(|e| anyhow!(e))?,
-    };
-    Ok(Config {
-        lang,
-        keymap,
-        vimrc,
-    })
+    Ok(Config { lang, keymap })
 }
 
 /// コメント (`//` と `/* */`) と末尾カンマを空白に置き換えて、普通の JSON にする。
@@ -285,7 +248,7 @@ pub fn template() -> String {
 // "lang" is the display language: "en" (English, default) or "ja" (Japanese).
 //
 // Key bindings in "keymap" are added on top of (and override) the defaults.
-// "vimrc" takes Vim map commands such as "imap jj <Esc>" (see the reference below).
+// Vim-style mappings such as "imap jj <Esc>" go in the vimrc file next to this one (:vimrc).
 //   "context"  : where the bindings are active. Omit it to make them active everywhere
 //   "bindings" : {{ "key": "command name" }}. Use null to disable a key
 // When several bindings match the same key, the one written later wins.
@@ -309,15 +272,6 @@ pub fn template() -> String {
     //   "context": "Insert",
     //   "bindings": {{ "j k": "vim::NormalMode" }}   // jk returns to Normal mode
     // }}
-  ],
-  // Vim-style mappings (like a .vimrc). Each line is one command
-  "vimrc": [
-    // Examples: remove the leading // to enable them
-    // "imap jj <Esc>",                  // jj in Insert mode returns to Normal mode
-    // "let mapleader = ' '",            // use Space as <Leader>
-    // "nnoremap <Leader>w :w<CR>",      // Space then w saves
-    // "nnoremap <Leader>s <C-r>",       // Space then s sends the request
-    // "set timeoutlen=500"              // wait 500 ms for the rest of a mapping
   ]
 }}
 
@@ -328,7 +282,7 @@ pub fn template() -> String {
 // "lang" は表示言語です: "en" (英語、既定) または "ja" (日本語)。
 //
 // "keymap" にキーバインドを書くと、既定のキーバインドに追加・上書きされます。
-// "vimrc" には "imap jj <Esc>" のような Vim の map コマンドを書けます (後半のリファレンス参照)。
+// "imap jj <Esc>" のような Vim 形式のマッピングは、同じ場所の vimrc ファイルに書きます (:vimrc)。
 //   "context"  : そのバインドが有効になる環境。省略するとどこでも有効です
 //   "bindings" : {{ "キー": "コマンド名" }}。null を指定するとそのキーを無効にします
 // 同じキーが複数当てはまるときは、後に書いたものが優先されます。
@@ -352,15 +306,6 @@ pub fn template() -> String {
     //   "context": "Insert",
     //   "bindings": {{ "j k": "vim::NormalMode" }}   // jk で Normal モードへ
     // }}
-  ],
-  // Vim 形式のマッピング (.vimrc と同じ書き方)。1 行に 1 コマンド
-  "vimrc": [
-    // 例: 先頭の // を外すと有効になります
-    // "imap jj <Esc>",                  // Insert モードで jj → Normal モードへ
-    // "let mapleader = ' '",            // <Leader> を Space にする
-    // "nnoremap <Leader>w :w<CR>",      // Space → w で保存
-    // "nnoremap <Leader>s <C-r>",       // Space → s で送信
-    // "set timeoutlen=500"              // マッピングの続きのキーを 500 ms 待つ
   ]
 }}
 
@@ -480,61 +425,17 @@ pub fn reference() -> String {
         }
     }
     line("");
-    for l in vimrc_reference() {
-        line(l);
-    }
-    line("");
     line(t!("■ : commands", "■ : コマンド"));
     line(t!(
         "  :w save  :q quit  :wq save and quit  :send send  :help help  :config open this file",
         "  :w 保存  :q 終了  :wq 保存して終了  :send 送信  :help ヘルプ  :config この設定を開く"
     ));
+    line(t!(
+        "  :vimrc open the vimrc file (Vim-style mappings such as imap jj <Esc>)",
+        "  :vimrc vimrc ファイル (imap jj <Esc> のような Vim 形式のマッピング) を開く"
+    ));
     lines.push(marker(REFERENCE_END).to_string());
     lines.join("\n")
-}
-
-/// リファレンスの "vimrc" の説明。
-fn vimrc_reference() -> Vec<&'static str> {
-    let en = [
-        "■ \"vimrc\" (Vim-style mappings: replace keys with other keys)",
-        "  \"vimrc\" is an array of lines (or one string with newlines). Lines starting with \" are comments.",
-        "  The right-hand side is the keys to press instead, so anything you can type works,",
-        "  including : commands: \"nnoremap <Leader>w :w<CR>\"",
-        "  imap / inoremap      Insert mode",
-        "  nmap / nnoremap      Normal mode",
-        "  vmap / xmap / vnoremap / xnoremap   Visual mode",
-        "  omap / onoremap      after an operator (d / c / y)",
-        "  cmap / cnoremap      : command line and the rename prompt",
-        "  map / noremap        Normal + Visual + operator      map! / noremap!   Insert + command line",
-        "  *unmap {lhs}         remove a mapping written earlier (nunmap, iunmap, unmap!, ...)",
-        "  {rhs} = <Nop>        make the key do nothing (e.g. \"nnoremap q <Nop>\")",
-        "  <silent> <buffer> <unique> are accepted and ignored. <nowait> does not wait for longer mappings",
-        "  Keys: <Esc> <CR> <Tab> <S-Tab> <BS> <Del> <Space> <Up> <F5> <C-x> <M-x> (<A-x>) <lt> <Bar> <Bslash>",
-        "        <Leader> <LocalLeader> (default \\; change with let mapleader = ' ' before the mappings)",
-        "  set timeoutlen=1000  how long (ms) to wait for the rest of a mapping. set notimeout waits forever",
-    ];
-    let ja = [
-        "■ \"vimrc\" (Vim 形式のマッピング: キーを別のキー列に置き換える)",
-        "  \"vimrc\" は行の配列 (または改行を含む 1 つの文字列) です。\" で始まる行はコメントです。",
-        "  右辺は代わりに押すキー列なので、: コマンドも含め、手で打てるものは何でも書けます:",
-        "  \"nnoremap <Leader>w :w<CR>\"",
-        "  imap / inoremap      Insert モード",
-        "  nmap / nnoremap      Normal モード",
-        "  vmap / xmap / vnoremap / xnoremap   Visual モード",
-        "  omap / onoremap      オペレータ (d / c / y) の後",
-        "  cmap / cnoremap      : コマンドラインとリクエスト名の入力欄",
-        "  map / noremap        Normal + Visual + オペレータの後   map! / noremap!   Insert + コマンドライン",
-        "  *unmap {lhs}         前に書いたマッピングを取り消す (nunmap, iunmap, unmap! など)",
-        "  {rhs} = <Nop>        そのキーで何もしない (例: \"nnoremap q <Nop>\")",
-        "  <silent> <buffer> <unique> は書けますが無視します。<nowait> は長いマッピングの続きを待ちません",
-        "  キー: <Esc> <CR> <Tab> <S-Tab> <BS> <Del> <Space> <Up> <F5> <C-x> <M-x> (<A-x>) <lt> <Bar> <Bslash>",
-        "        <Leader> <LocalLeader> (既定は \\。マッピングより前に let mapleader = ' ' で変更)",
-        "  set timeoutlen=1000  マッピングの続きのキーを待つ時間 (ミリ秒)。set notimeout で待ち続けます",
-    ];
-    match crate::i18n::current() {
-        crate::i18n::Lang::En => en.to_vec(),
-        crate::i18n::Lang::Ja => ja.to_vec(),
-    }
 }
 
 fn json_escape(s: &str) -> String {
@@ -629,33 +530,6 @@ mod tests {
             km.lookup(ContextSet::default(), &parse_keys("f2").unwrap()),
             Lookup::Found { global: true, .. }
         ));
-    }
-
-    #[test]
-    fn parses_vimrc() {
-        let config = parse(
-            r#"{
-  "vimrc": [
-    "\" comment",
-    "imap jj <Esc>",
-    "let mapleader = ' '",
-    "nnoremap <Leader>w :w<CR>",
-  ],
-}"#,
-        )
-        .unwrap();
-        assert_eq!(config.vimrc.maps.len(), 2);
-        assert_eq!(config.user_count(), 2);
-        // 改行を含む 1 つの文字列でもよい
-        let text = parse(r#"{ "vimrc": "imap jj <Esc>\nset tm=200\n" }"#).unwrap();
-        assert_eq!(text.vimrc.maps, config.vimrc.maps[..1]);
-        let err = parse(r#"{ "vimrc": ["imap jj <Esc>", "nmap"] }"#)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("\"vimrc\" line 2"), "{err}");
-        // 雛形の例はコメントを外せばそのまま使える
-        let uncommented = template().replace("    // \"", "    \"");
-        assert_eq!(parse(&uncommented).unwrap().vimrc.maps.len(), 3);
     }
 
     #[test]

@@ -208,6 +208,8 @@ pub enum Action {
     SaveAndQuit(Vec<Request>),
     /// 設定ファイルをエディタで開き、閉じたら読み直す
     EditConfig,
+    /// vimrc ファイルをエディタで開き、閉じたら読み直す
+    EditVimrc,
     /// テキストをクリップボードにコピーする
     Copy(String),
 }
@@ -1014,8 +1016,8 @@ impl App {
                         self.typeahead.clear();
                         self.waiting_since = None;
                         self.status = t!(
-                            "Recursive mapping (check \"vimrc\" in :config; use noremap)",
-                            "マッピングが再帰しています (:config の \"vimrc\" を確認してください。noremap を使えます)"
+                            "Recursive mapping (check :vimrc; use noremap)",
+                            "マッピングが再帰しています (:vimrc を確認してください。noremap を使えます)"
                         )
                         .to_string();
                         return Action::None;
@@ -1168,6 +1170,10 @@ impl App {
             C::AppOpenConfig => {
                 self.back_to_normal();
                 return Action::EditConfig;
+            }
+            C::AppOpenVimrc => {
+                self.back_to_normal();
+                return Action::EditVimrc;
             }
             C::AppShowHelp => {
                 self.back_to_normal();
@@ -1558,6 +1564,7 @@ impl App {
                 Action::None
             }
             "config" | "keymap" => Action::EditConfig,
+            "vimrc" => Action::EditVimrc,
             _ => {
                 self.status = tf!("Unknown command: :{cmd}", "不明なコマンド: :{cmd}");
                 Action::None
@@ -2726,6 +2733,9 @@ mod tests {
         let mut app = App::new(vec![]);
         type_str(&mut app, ":config");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::EditConfig);
+        assert_eq!(app.mode, Mode::Normal);
+        type_str(&mut app, ":vimrc");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::EditVimrc);
         assert_eq!(app.mode, Mode::Normal);
     }
 

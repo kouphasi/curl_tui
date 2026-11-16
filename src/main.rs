@@ -23,13 +23,14 @@ use curl_tui::{
     app::{Action, App, Mode, PreviewState, ResponseState},
     clipboard, collection, config, http, i18n, kitty,
     model::Response,
-    preview, t, tf,
+    preview, t, tf, vimrc,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // 表示言語は設定ファイルで決まるので、何かを表示する前に読む
     let config_path = config::default_path();
+    let vimrc_path = vimrc::default_path();
     let loaded = load_config(&config_path);
     let path = match std::env::args().nth(1).as_deref() {
         Some("-h" | "--help") => {
@@ -56,6 +57,14 @@ async fn main() -> Result<()> {
                     p = config_path.display()
                 )
             );
+            println!(
+                "{}",
+                tf!(
+                    "vimrc (Vim-style mappings): {p} (edit with :vimrc)",
+                    "vimrc (Vim 形式のマッピング): {p} (:vimrc で編集)",
+                    p = vimrc_path.display()
+                )
+            );
             return Ok(());
         }
         Some(p) => PathBuf::from(p),
@@ -70,11 +79,9 @@ async fn main() -> Result<()> {
         app.set_preview_zoom(zoom);
         app.status.clear();
     }
+    let loaded_ok = loaded.is_ok();
     match loaded {
-        Ok(config) => {
-            app.set_keymap(config.keymap);
-            app.set_vimrc(config.vimrc);
-        }
+        Ok(config) => app.set_keymap(config.keymap),
         // 設定が壊れていても既定のキーで起動する
         Err(e) => {
             app.status = tf!(
@@ -82,6 +89,17 @@ async fn main() -> Result<()> {
                 "設定エラー (既定のキーで起動): {e:#}"
             )
         }
+    }
+    match vimrc::load(&vimrc_path) {
+        Ok(vimrc) => app.set_vimrc(vimrc),
+        // config.jsonc のエラーがあればそちらを表示したままにする
+        Err(e) if loaded_ok => {
+            app.status = tf!(
+                "vimrc error (starting without mappings): {e:#}",
+                "vimrc のエラー (マッピングなしで起動): {e:#}"
+            )
+        }
+        Err(_) => {}
     }
     let browser = preview::find_browser();
     app.preview_unavailable = preview_unavailable(browser.as_deref());
@@ -95,7 +113,11 @@ async fn main() -> Result<()> {
         hook(info);
     }));
     enable_extras(enhanced())?;
-    let result = run(&mut terminal, &mut app, &path, &config_path, browser).await;
+    let files = ConfigFiles {
+        config: config_path,
+        vimrc: vimrc_path,
+    };
+    let result = run(&mut terminal, &mut app, &path, &files, browser).await;
     if app.preview_unavailable.is_none() {
         let mut out = std::io::stdout();
         let _ = out.write_all(kitty::free().as_bytes());
@@ -163,14 +185,34 @@ fn disable_extras(enhanced: bool) {
     );
 }
 
+/// 設定ファイルの場所。
+struct ConfigFiles {
+    /// config.jsonc (表示言語と "keymap")
+    config: PathBuf,
+    /// vimrc (Vim 形式のマッピング)
+    vimrc: PathBuf,
+}
+
+/// エディタで開く設定ファイル。
+#[derive(Debug, Clone, Copy)]
+enum EditTarget {
+    Config,
+    Vimrc,
+}
+
 /// TUI を一時的に抜けて設定ファイルをエディタで開き、閉じたら読み直す。
 fn edit_config(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    config_path: &Path,
+    target: EditTarget,
+    files: &ConfigFiles,
     browser: Option<&Path>,
 ) -> Result<()> {
-    if let Err(e) = config::prepare(config_path) {
+    let (path, prepared) = match target {
+        EditTarget::Config => (&files.config, config::prepare(&files.config)),
+        EditTarget::Vimrc => (&files.vimrc, vimrc::prepare(&files.vimrc)),
+    };
+    if let Err(e) = prepared {
         app.status = tf!(
             "Cannot prepare the config file: {e:#}",
             "設定ファイルを用意できません: {e:#}"
@@ -182,7 +224,7 @@ fn edit_config(
     let (program, args) = config::editor_command();
     let edited = std::process::Command::new(&program)
         .args(&args)
-        .arg(config_path)
+        .arg(path)
         .status();
     // 端末を作り直して全体を描き直す (Terminal::clear はカーソル位置の問い合わせで失敗しうる)
     *terminal = ratatui::init();
@@ -193,21 +235,37 @@ fn edit_config(
             "Cannot launch the editor `{program}` (check $EDITOR): {e}",
             "エディタ `{program}` を起動できません ($EDITOR を確認してください): {e}"
         ),
-        Ok(_) => match load_config(config_path) {
-            Ok(config) => {
-                let count = config.user_count();
-                app.set_keymap(config.keymap);
-                app.set_vimrc(config.vimrc);
-                tf!(
-                    "Config applied ({count} key bindings): {p}",
-                    "設定を反映しました (キーバインド {count} 件): {p}",
-                    p = config_path.display()
-                )
-            }
-            Err(e) => tf!(
-                "Config error (not applied): {e:#}",
-                "設定エラー (未反映): {e:#}"
-            ),
+        Ok(_) => match target {
+            EditTarget::Config => match load_config(path) {
+                Ok(config) => {
+                    let count = config.keymap.user_count();
+                    app.set_keymap(config.keymap);
+                    tf!(
+                        "Config applied ({count} key bindings): {p}",
+                        "設定を反映しました (キーバインド {count} 件): {p}",
+                        p = path.display()
+                    )
+                }
+                Err(e) => tf!(
+                    "Config error (not applied): {e:#}",
+                    "設定エラー (未反映): {e:#}"
+                ),
+            },
+            EditTarget::Vimrc => match vimrc::load(path) {
+                Ok(vimrc) => {
+                    let count = vimrc.maps.len();
+                    app.set_vimrc(vimrc);
+                    tf!(
+                        "vimrc applied ({count} mappings): {p}",
+                        "vimrc を反映しました (マッピング {count} 件): {p}",
+                        p = path.display()
+                    )
+                }
+                Err(e) => tf!(
+                    "vimrc error (not applied): {e:#}",
+                    "vimrc のエラー (未反映): {e:#}"
+                ),
+            },
         },
     };
     // 言語が変わったかもしれないので、表示済みの文言を作り直す
@@ -222,7 +280,7 @@ async fn run(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     path: &Path,
-    config_path: &Path,
+    files: &ConfigFiles,
     browser: Option<PathBuf>,
 ) -> Result<()> {
     let client = http::build_client(Duration::from_secs(30))?;
@@ -254,7 +312,7 @@ async fn run(
             update_placement(app, image_size, cell_w, cell_h, &mut placed)?;
         }
 
-        let mut open_config = false;
+        let mut open_config = None;
         // "vimrc" のマッピングの続きのキーを待っているなら、その期限
         let deadline = app.key_deadline();
         let mut action = tokio::select! {
@@ -323,7 +381,8 @@ async fn run(
                     // 保存できなければ終了しない
                     Err(e) => app.status = tf!("Failed to save: {e:#}", "保存に失敗: {e:#}"),
                 },
-                Action::EditConfig => open_config = true,
+                Action::EditConfig => open_config = Some(EditTarget::Config),
+                Action::EditVimrc => open_config = Some(EditTarget::Vimrc),
                 Action::Copy(text) => {
                     if let Err(e) = clipboard::copy(&text, &mut std::io::stdout()) {
                         app.status = tf!("Failed to copy: {e}", "コピーに失敗: {e}");
@@ -331,12 +390,12 @@ async fn run(
                 }
             }
             // エディタを開くときは残りのキーを捨てる (設定を読み直すため)
-            if open_config || !app.has_queued_keys() {
+            if open_config.is_some() || !app.has_queued_keys() {
                 break;
             }
             action = app.resume_keys();
         }
-        if open_config {
+        if let Some(target) = open_config {
             // 入力の読み取りを止めてからエディタに端末を渡す (止めないとキー入力を奪い合う)
             drop(events);
             if placed.take().is_some() {
@@ -344,7 +403,7 @@ async fn run(
                 out.write_all(kitty::hide().as_bytes())?;
                 out.flush()?;
             }
-            let edited = edit_config(terminal, app, config_path, browser.as_deref());
+            let edited = edit_config(terminal, app, target, files, browser.as_deref());
             events = EventStream::new();
             cursor_mode = None;
             edited?;

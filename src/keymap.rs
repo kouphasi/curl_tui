@@ -44,6 +44,7 @@ commands! {
     AppShowHelp => "app::ShowHelp", "Show help", "ヘルプを表示";
     AppOpenCommandLine => "app::OpenCommandLine", "Open the : command line", ": コマンドラインを開く";
     AppOpenConfig => "app::OpenConfig", "Open this config file in your editor (same as :config)", "この設定ファイルをエディタで開く (:config と同じ)";
+    AppOpenVimrc => "app::OpenVimrc", "Open the vimrc file (Vim-style mappings) in your editor (same as :vimrc)", "vimrc ファイル (Vim 形式のマッピング) をエディタで開く (:vimrc と同じ)";
 
     PaneFocusLeft => "pane::FocusLeft", "Focus the pane to the left (Collection)", "左のペイン (Collection) へ";
     PaneFocusDown => "pane::FocusDown", "Focus the pane below", "下のペインへ";

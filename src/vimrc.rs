@@ -1,11 +1,13 @@
-//! 設定ファイルの `"vimrc"`: Vim の `imap jj <Esc>` のような map 系コマンドで、
-//! 押したキー列を別のキー列に置き換える。
+//! vimrc ファイル (`~/.config/curl_tui/vimrc`): Vim の `imap jj <Esc>` のような
+//! map 系コマンドで、押したキー列を別のキー列に置き換える。
 //!
 //! キーマップ ([`crate::keymap`]) が「キー → コマンド」なのに対し、こちらは Vim と同じく
 //! 「キー → キー」の置き換え。置き換えた後のキーは普通に押したのと同じように処理される。
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anyhow::{Context, anyhow};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::keymap::KeyStroke;
@@ -99,7 +101,138 @@ impl Mapping {
     }
 }
 
-/// `"vimrc"` の内容。
+/// vimrc ファイルの場所: `$CURL_TUI_VIMRC` → 設定ファイル (config.jsonc) と同じディレクトリの `vimrc`。
+pub fn default_path() -> PathBuf {
+    match std::env::var_os("CURL_TUI_VIMRC").filter(|v| !v.is_empty()) {
+        Some(path) => PathBuf::from(path),
+        None => crate::config::default_path().with_file_name("vimrc"),
+    }
+}
+
+/// vimrc ファイルを読む。ファイルが無ければマッピングなし。
+pub fn load(path: &Path) -> anyhow::Result<Vimrc> {
+    if !path.exists() {
+        return Ok(Vimrc::default());
+    }
+    let text = std::fs::read_to_string(path).with_context(|| {
+        tf!(
+            "cannot read {p}",
+            "{p} を読み込めません",
+            p = path.display()
+        )
+    })?;
+    let lines: Vec<&str> = text.lines().collect();
+    parse(&lines).map_err(|e| anyhow!("{}: {e}", path.display()))
+}
+
+/// エディタで開く前の準備。ファイルが無い (空の) ときだけ雛形を作る。
+pub fn prepare(path: &Path) -> anyhow::Result<()> {
+    match std::fs::read_to_string(path) {
+        Ok(text) if !text.trim().is_empty() => return Ok(()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).with_context(|| {
+                tf!(
+                    "cannot read {p}",
+                    "{p} を読み込めません",
+                    p = path.display()
+                )
+            });
+        }
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            tf!(
+                "cannot create {p}",
+                "{p} を作成できません",
+                p = parent.display()
+            )
+        })?;
+    }
+    std::fs::write(path, template()).with_context(|| {
+        tf!(
+            "cannot write to {p}",
+            "{p} に書き込めません",
+            p = path.display()
+        )
+    })
+}
+
+/// 新しく作る vimrc の内容 (現在の表示言語で書く)。すべてコメントなので何も変えない。
+pub fn template() -> String {
+    let lines: &[&str] = match crate::i18n::current() {
+        crate::i18n::Lang::En => &[
+            "\" curl_tui vimrc: Vim-style key mappings",
+            "\" Changes take effect as soon as you save and quit the editor (open it with :vimrc).",
+            "\" Lines starting with \" are comments. Remove the leading \" of an example to enable it.",
+            "\"",
+            "\" Examples:",
+            "\"imap jj <Esc>",
+            "\"let mapleader = ' '",
+            "\"nnoremap <Leader>w :w<CR>",
+            "\"nnoremap <Leader>s <C-r>",
+            "\"nnoremap q <Nop>",
+            "\"set timeoutlen=500",
+            "\"",
+            "\" ==== Reference ====",
+            "\" The right-hand side is the keys to press instead, so anything you can type works,",
+            "\" including : commands (:w<CR>) and keys bound in \"keymap\" of config.jsonc.",
+            "\"   imap / inoremap      Insert mode",
+            "\"   nmap / nnoremap      Normal mode",
+            "\"   vmap / xmap / vnoremap / xnoremap   Visual mode",
+            "\"   omap / onoremap      after an operator (d / c / y)",
+            "\"   cmap / cnoremap      : command line and the rename prompt",
+            "\"   map / noremap        Normal + Visual + operator",
+            "\"   map! / noremap!      Insert + command line",
+            "\"   *unmap {lhs}         remove a mapping written earlier (nunmap, iunmap, unmap!, ...)",
+            "\"   {rhs} = <Nop>        make the key do nothing",
+            "\" map applies mappings again to the result; noremap does not.",
+            "\" <silent> <buffer> <unique> are accepted and ignored. <nowait> does not wait for longer mappings.",
+            "\" Keys: <Esc> <CR> <Tab> <S-Tab> <BS> <Del> <Space> <Up> <F5> <C-x> <M-x> (<A-x>) <lt> <Bar> <Bslash>",
+            "\"       <Leader> <LocalLeader> (default \\; set let mapleader = ' ' before the mappings)",
+            "\" set timeoutlen=1000  how long (ms) to wait for the rest of a mapping. set notimeout waits forever",
+            "\" Other commands (set number, autocmd, ...) are not supported and are reported as errors.",
+        ],
+        crate::i18n::Lang::Ja => &[
+            "\" curl_tui の vimrc: Vim 形式のキーマッピング",
+            "\" 保存してエディタを終了すると、すぐに反映されます (:vimrc で開けます)。",
+            "\" \" で始まる行はコメントです。例の先頭の \" を外すと有効になります。",
+            "\"",
+            "\" 例:",
+            "\"imap jj <Esc>",
+            "\"let mapleader = ' '",
+            "\"nnoremap <Leader>w :w<CR>",
+            "\"nnoremap <Leader>s <C-r>",
+            "\"nnoremap q <Nop>",
+            "\"set timeoutlen=500",
+            "\"",
+            "\" ==== リファレンス ====",
+            "\" 右辺は代わりに押すキー列なので、: コマンド (:w<CR>) や config.jsonc の \"keymap\" で",
+            "\" 割り当てたキーも含め、手で打てるものは何でも書けます。",
+            "\"   imap / inoremap      Insert モード",
+            "\"   nmap / nnoremap      Normal モード",
+            "\"   vmap / xmap / vnoremap / xnoremap   Visual モード",
+            "\"   omap / onoremap      オペレータ (d / c / y) の後",
+            "\"   cmap / cnoremap      : コマンドラインとリクエスト名の入力欄",
+            "\"   map / noremap        Normal + Visual + オペレータの後",
+            "\"   map! / noremap!      Insert + コマンドライン",
+            "\"   *unmap {lhs}         前に書いたマッピングを取り消す (nunmap, iunmap, unmap! など)",
+            "\"   {rhs} = <Nop>        そのキーで何もしない",
+            "\" map は展開後のキーにもマッピングを適用し、noremap は適用しません。",
+            "\" <silent> <buffer> <unique> は書けますが無視します。<nowait> は長いマッピングの続きを待ちません。",
+            "\" キー: <Esc> <CR> <Tab> <S-Tab> <BS> <Del> <Space> <Up> <F5> <C-x> <M-x> (<A-x>) <lt> <Bar> <Bslash>",
+            "\"       <Leader> <LocalLeader> (既定は \\。マッピングより前に let mapleader = ' ' で変更)",
+            "\" set timeoutlen=1000  マッピングの続きのキーを待つ時間 (ミリ秒)。set notimeout で待ち続けます",
+            "\" それ以外のコマンド (set number / autocmd など) には対応しておらず、エラーになります。",
+        ],
+    };
+    lines.join("\n") + "\n"
+}
+
+/// vimrc の内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Vimrc {
     pub maps: Vec<Mapping>,
@@ -170,7 +303,7 @@ struct Leaders {
     local: Vec<KeyStroke>,
 }
 
-/// `"vimrc"` の各行を解釈する。
+/// vimrc の各行を解釈する。
 pub fn parse<S: AsRef<str>>(lines: &[S]) -> Result<Vimrc, String> {
     let mut vimrc = Vimrc::default();
     let backslash = vec![char_key('\\')];
@@ -182,8 +315,8 @@ pub fn parse<S: AsRef<str>>(lines: &[S]) -> Result<Vimrc, String> {
         let n = i + 1;
         parse_line(line.as_ref(), &mut vimrc, &mut leaders).map_err(|e| {
             tf!(
-                "\"vimrc\" line {n} ({line}): {e}",
-                "\"vimrc\" の {n} 行目 ({line}): {e}",
+                "line {n} ({line}): {e}",
+                "{n} 行目 ({line}): {e}",
                 line = line.as_ref().trim()
             )
         })?;
@@ -607,6 +740,40 @@ mod tests {
         assert!(!f.longer);
         assert_eq!(f.exact.unwrap().lhs, keys("j j"));
         assert_eq!(vimrc.find(MapMode::Normal, &keys("j")).exact, None);
+    }
+
+    #[test]
+    fn template_examples_work_when_uncommented() {
+        let template = template();
+        assert!(
+            parse(&template.lines().collect::<Vec<_>>())
+                .unwrap()
+                .is_empty()
+        );
+        let examples: Vec<&str> = template
+            .lines()
+            .filter_map(|l| l.strip_prefix('"'))
+            .filter(|l| !l.is_empty() && !l.starts_with(' '))
+            .collect();
+        assert_eq!(examples.len(), 6);
+        assert_eq!(parse(&examples).unwrap().maps.len(), 4);
+    }
+
+    #[test]
+    fn load_and_prepare() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/vimrc");
+        assert!(load(&path).unwrap().is_empty());
+        prepare(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), template());
+        // 既にあるファイルには触らない
+        std::fs::write(&path, "imap jj <Esc>\n").unwrap();
+        prepare(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "imap jj <Esc>\n");
+        assert_eq!(load(&path).unwrap().maps.len(), 1);
+        std::fs::write(&path, "imap jj <Esc>\nnmap\n").unwrap();
+        let err = load(&path).unwrap_err().to_string();
+        assert!(err.contains("vimrc") && err.contains("line 2"), "{err}");
     }
 
     #[test]
