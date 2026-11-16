@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use curl_tui::{
     app::{Action, App, Mode, PreviewState, ResponseState},
-    collection, http, kitty,
+    collection, config, http, kitty,
     model::Response,
     preview,
 };
@@ -32,6 +32,10 @@ async fn main() -> Result<()> {
         Some("-h" | "--help") => {
             println!("使い方: curl_tui [コレクションファイル.json]");
             println!("既定: {}", collection::default_path().display());
+            println!(
+                "設定ファイル: {} (:config で編集)",
+                config::default_path().display()
+            );
             return Ok(());
         }
         Some(p) => PathBuf::from(p),
@@ -45,6 +49,12 @@ async fn main() -> Result<()> {
     {
         app.set_preview_zoom(zoom);
         app.status.clear();
+    }
+    let config_path = config::default_path();
+    match config::load(&config_path) {
+        Ok(keymap) => app.set_keymap(keymap),
+        // 設定が壊れていても既定のキーで起動する
+        Err(e) => app.status = format!("設定エラー (既定のキーで起動): {e:#}"),
     }
     let browser = preview::find_browser();
     app.preview_unavailable = match (kitty::detect(), &browser) {
@@ -64,22 +74,38 @@ async fn main() -> Result<()> {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         hook(info);
     }));
+    enable_extras(enhanced())?;
+    let result = run(&mut terminal, &mut app, &path, &config_path, browser).await;
+    if app.preview_unavailable.is_none() {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(kitty::free().as_bytes());
+        let _ = out.flush();
+    }
+    disable_extras(enhanced());
+    ratatui::restore();
+    result
+}
+
+/// 通常の端末では Shift+Esc が素の Esc と区別できない。kitty keyboard protocol に
+/// 対応した端末では修飾キー付きの Esc を受け取れるようにする。
+fn enhanced() -> bool {
+    static ENHANCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENHANCED.get_or_init(|| supports_keyboard_enhancement().unwrap_or(false))
+}
+
+/// raw mode / 代替画面以外の端末設定 (ペースト・マウス・キーボード拡張) を有効にする。
+fn enable_extras(enhanced: bool) -> std::io::Result<()> {
     execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
-    // 通常の端末では Shift+Esc が素の Esc と区別できない。kitty keyboard protocol に
-    // 対応した端末では修飾キー付きの Esc を受け取れるようにする
-    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
     if enhanced {
         execute!(
             std::io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
     }
-    let result = run(&mut terminal, &mut app, &path, browser).await;
-    if app.preview_unavailable.is_none() {
-        let mut out = std::io::stdout();
-        let _ = out.write_all(kitty::free().as_bytes());
-        let _ = out.flush();
-    }
+    Ok(())
+}
+
+fn disable_extras(enhanced: bool) {
     if enhanced {
         let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
@@ -89,8 +115,42 @@ async fn main() -> Result<()> {
         DisableMouseCapture,
         SetCursorStyle::DefaultUserShape
     );
+}
+
+/// TUI を一時的に抜けて設定ファイルをエディタで開き、閉じたら読み直す。
+fn edit_config(terminal: &mut DefaultTerminal, app: &mut App, config_path: &Path) -> Result<()> {
+    if let Err(e) = config::prepare(config_path) {
+        app.status = format!("設定ファイルを用意できません: {e:#}");
+        return Ok(());
+    }
+    disable_extras(enhanced());
     ratatui::restore();
-    result
+    let (program, args) = config::editor_command();
+    let edited = std::process::Command::new(&program)
+        .args(&args)
+        .arg(config_path)
+        .status();
+    // 端末を作り直して全体を描き直す (Terminal::clear はカーソル位置の問い合わせで失敗しうる)
+    *terminal = ratatui::init();
+    enable_extras(enhanced())?;
+
+    app.status = match edited {
+        Err(e) => {
+            format!("エディタ `{program}` を起動できません ($EDITOR を確認してください): {e}")
+        }
+        Ok(_) => match config::load(config_path) {
+            Ok(keymap) => {
+                let count = keymap.user_count();
+                app.set_keymap(keymap);
+                format!(
+                    "設定を反映しました (キーバインド {count} 件): {}",
+                    config_path.display()
+                )
+            }
+            Err(e) => format!("設定エラー (未反映): {e:#}"),
+        },
+    };
+    Ok(())
 }
 
 /// 描画結果 (どのレスポンスのものか, 描画した幅のセル数, 結果)。
@@ -100,6 +160,7 @@ async fn run(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     path: &Path,
+    config_path: &Path,
     browser: Option<PathBuf>,
 ) -> Result<()> {
     let client = http::build_client(Duration::from_secs(30))?;
@@ -131,6 +192,7 @@ async fn run(
             update_placement(app, image_size, cell_w, cell_h, &mut placed)?;
         }
 
+        let mut open_config = false;
         tokio::select! {
             maybe = events.next() => {
                 let Some(event) = maybe else { break };
@@ -162,6 +224,7 @@ async fn run(
                         // 保存できなければ終了しない
                         Err(e) => app.status = format!("保存に失敗: {e:#}"),
                     },
+                    Action::EditConfig => open_config = true,
                 }
             }
             Some(res) = rx.recv() => app.set_response(res),
@@ -184,6 +247,19 @@ async fn run(
                 }
             }
             _ = ticker.tick(), if app.is_busy() => app.tick(),
+        }
+        if open_config {
+            // 入力の読み取りを止めてからエディタに端末を渡す (止めないとキー入力を奪い合う)
+            drop(events);
+            if placed.take().is_some() {
+                let mut out = std::io::stdout();
+                out.write_all(kitty::hide().as_bytes())?;
+                out.flush()?;
+            }
+            let edited = edit_config(terminal, app, config_path);
+            events = EventStream::new();
+            cursor_mode = None;
+            edited?;
         }
     }
     Ok(())
