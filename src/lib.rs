@@ -3,9 +3,11 @@
 pub mod app;
 pub mod clipboard;
 pub mod collection;
+pub mod config;
 pub mod curl;
 pub mod editor;
 pub mod http;
+pub mod keymap;
 pub mod kitty;
 pub mod model;
 pub mod preview;

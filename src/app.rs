@@ -12,6 +12,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::curl;
 use crate::editor::TextEditor;
+use crate::keymap::{Command, ContextSet, Ctx, KeyStroke, Keymap, Lookup};
 use crate::model::{self, HttpMethod, Request, Response};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,42 +67,6 @@ pub enum Operator {
     Yank,
 }
 
-impl Operator {
-    fn from_char(c: char) -> Option<Self> {
-        match c {
-            'd' => Some(Operator::Delete),
-            'c' => Some(Operator::Change),
-            'y' => Some(Operator::Yank),
-            _ => None,
-        }
-    }
-
-    fn as_char(self) -> char {
-        match self {
-            Operator::Delete => 'd',
-            Operator::Change => 'c',
-            Operator::Yank => 'y',
-        }
-    }
-}
-
-/// 2 打鍵目を待っているキー。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Pending {
-    #[default]
-    None,
-    /// `g` (gg / gt / gT)
-    G,
-    /// `Ctrl+W` (ウィンドウ移動)
-    Window,
-    /// `d` / `c` / `y` の後のモーション待ち
-    Op(Operator),
-    /// `dg` など、オペレータの後の `g`
-    OpG(Operator),
-    /// `r` の後の置換文字待ち
-    Replace,
-}
-
 /// カーソル移動。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Motion {
@@ -120,23 +85,6 @@ enum Motion {
 }
 
 impl Motion {
-    fn from_key(code: KeyCode) -> Option<Self> {
-        Some(match code {
-            KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => Motion::Left,
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Char(' ') => Motion::Right,
-            KeyCode::Char('k') | KeyCode::Up => Motion::Up,
-            KeyCode::Char('j') | KeyCode::Down => Motion::Down,
-            KeyCode::Char('w') => Motion::WordForward,
-            KeyCode::Char('b') => Motion::WordBackward,
-            KeyCode::Char('e') => Motion::WordEnd,
-            KeyCode::Char('0') | KeyCode::Home => Motion::LineStart,
-            KeyCode::Char('^') => Motion::FirstNonBlank,
-            KeyCode::Char('$') | KeyCode::End => Motion::LineEnd,
-            KeyCode::Char('G') => Motion::Bottom,
-            _ => return None,
-        })
-    }
-
     fn linewise(self) -> bool {
         matches!(
             self,
@@ -254,6 +202,8 @@ pub enum Action {
     Save(Vec<Request>),
     /// `:wq` 保存してから終了
     SaveAndQuit(Vec<Request>),
+    /// 設定ファイルをエディタで開き、閉じたら読み直す
+    EditConfig,
     /// テキストをクリップボードにコピーする
     Copy(String),
 }
@@ -373,7 +323,13 @@ pub struct App {
     pub regions: RefCell<Regions>,
     pub spinner: usize,
     pub status: String,
-    pub pending: Pending,
+    pub keymap: Keymap,
+    /// 入力途中のキー列 (`g` / `Ctrl+W` など、続きのキーを待っている)
+    keys: Vec<KeyStroke>,
+    /// モーション待ちのオペレータと、それを呼び出したキーの表示
+    operator: Option<(Operator, String)>,
+    /// `r` の後の置換文字待ち (呼び出したキーの表示)
+    replace: Option<String>,
     pub command: TextEditor,
     /// テキスト欄でヤンクした内容
     pub register: Register,
@@ -422,7 +378,10 @@ impl App {
             regions: RefCell::new(Regions::default()),
             spinner: 0,
             status: "? でヘルプ / Ctrl+R で送信 / Ctrl+H/J/K/L でペイン移動".to_string(),
-            pending: Pending::None,
+            keymap: Keymap::default(),
+            keys: Vec::new(),
+            operator: None,
+            replace: None,
             command: TextEditor::single_line(""),
             register: Register::default(),
             request_register: None,
@@ -570,8 +529,11 @@ impl App {
         if self.mode != Mode::Visual {
             return None;
         }
-        let cursor = self.active_text_ref()?.cursor();
-        let anchor = self.visual.anchor;
+        let text = self.active_text_ref()?;
+        let cursor = text.cursor();
+        // タブの切り替えなどで別のテキストになっていても範囲外を指さないようにする
+        let row = self.visual.anchor.0.min(text.line_count() - 1);
+        let anchor = (row, self.visual.anchor.1.min(text.line_len(row)));
         Some(Selection {
             start: anchor.min(cursor),
             end: anchor.max(cursor),
@@ -749,20 +711,6 @@ impl App {
         }
     }
 
-    fn handle_preview_zoom_key(&mut self, key: KeyEvent) -> bool {
-        if self.response_tab != ResponseTab::Preview || self.preview_unavailable.is_some() {
-            return false;
-        }
-        let zoom = self.preview_zoom as i32;
-        match key.code {
-            KeyCode::Char('+' | '=') => self.set_preview_zoom(zoom + PREVIEW_ZOOM_STEP as i32),
-            KeyCode::Char('-') => self.set_preview_zoom(zoom - PREVIEW_ZOOM_STEP as i32),
-            KeyCode::Char('0') => self.set_preview_zoom(PREVIEW_ZOOM_DEFAULT as i32),
-            _ => return false,
-        }
-        true
-    }
-
     pub fn handle_event(&mut self, event: Event) -> Action {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
@@ -824,7 +772,7 @@ impl App {
             return;
         };
         let editor = editor.filter(|e| e.area.contains(pos));
-        self.pending = Pending::None;
+        self.clear_pending();
         // 編集中の欄の中をクリックしたときだけ Insert モードのままにする
         if self.mode == Mode::Editing && !(target == self.focus && editor.is_some()) {
             self.leave_insert();
@@ -893,8 +841,78 @@ impl App {
         }
     }
 
+    /// いま有効なコンテキスト (キーバインドの "context" と照らし合わせる)。
+    pub fn contexts(&self) -> ContextSet {
+        let set = ContextSet::default();
+        let pane = match self.focus {
+            Focus::Collection => Ctx::Collection,
+            Focus::Url => Ctx::Url,
+            Focus::Request => Ctx::Request,
+            Focus::Response => Ctx::Response,
+        };
+        match self.mode {
+            Mode::Help => set.with(Ctx::Help),
+            Mode::Rename => set.with(Ctx::Rename).with(Ctx::TextInput),
+            Mode::Command => set.with(Ctx::Command).with(Ctx::TextInput),
+            Mode::Editing => set
+                .with(Ctx::Insert)
+                .with(Ctx::TextInput)
+                .with(pane)
+                .with(Ctx::Editor),
+            Mode::Visual => {
+                let set = set.with(Ctx::Visual).with(pane);
+                if self.focused_view().is_some() {
+                    set.with(Ctx::TextView)
+                } else {
+                    set
+                }
+            }
+            Mode::Normal => {
+                let mut set = set.with(Ctx::Normal).with(pane);
+                if self.focused_view().is_some() {
+                    set = set.with(Ctx::TextView);
+                }
+                if self.focus == Focus::Response && self.preview_shown() {
+                    set = set.with(Ctx::Preview);
+                }
+                if self.editable() {
+                    set = set.with(Ctx::Editor);
+                }
+                if self.operator.is_some() {
+                    set = set.with(Ctx::Operator);
+                }
+                set
+            }
+        }
+    }
+
+    /// Preview タブを表示していて、プレビューが使えるか。
+    fn preview_shown(&self) -> bool {
+        self.response_tab == ResponseTab::Preview && self.preview_unavailable.is_none()
+    }
+
+    /// フォーカス中のペインが編集できるテキスト欄か。
+    fn editable(&self) -> bool {
+        match self.focus {
+            Focus::Url => true,
+            Focus::Request => self.request_tab != RequestTab::Curl,
+            _ => false,
+        }
+    }
+
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
+        self.clear_pending();
+    }
+
+    fn clear_pending(&mut self) {
+        self.keys.clear();
+        self.operator = None;
+        self.replace = None;
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
-        let action = self.dispatch_key(key);
+        let action = self.process_key(key);
         self.sync_curl_view();
         match (action, self.clipboard.take()) {
             (Action::None, Some(text)) => Action::Copy(text),
@@ -902,46 +920,325 @@ impl App {
         }
     }
 
-    fn dispatch_key(&mut self, key: KeyEvent) -> Action {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        // どのモードでも有効なショートカット
-        if ctrl {
-            match key.code {
-                KeyCode::Char('c') => return Action::Quit,
-                KeyCode::Char('r') => return self.send(),
-                KeyCode::Char('s') => return self.save(),
-                _ => {}
+    fn process_key(&mut self, key: KeyEvent) -> Action {
+        let stroke = KeyStroke::from_event(&key);
+        // r の後の置換文字
+        if self.replace.take().is_some() {
+            if let KeyCode::Char(c) = stroke.code
+                && !stroke.mods.contains(KeyModifiers::CONTROL)
+            {
+                self.replace_char(c);
+                return Action::None;
+            }
+            // 文字以外は置換の取り消し。どこでも有効なキーだけは実行する
+            return self.run_global(stroke);
+        }
+        self.keys.push(stroke);
+        match self.keymap.lookup(self.contexts(), &self.keys) {
+            Lookup::Pending => Action::None,
+            Lookup::Found { command, global } => {
+                let keys = std::mem::take(&mut self.keys);
+                self.dispatch(command, global, &keys)
+            }
+            Lookup::None => {
+                let keys = std::mem::take(&mut self.keys);
+                self.unbound(&keys, key)
             }
         }
-        if key.code == KeyCode::F(5) {
-            return self.send();
-        }
-        // Shift+Esc: フォーカス中のペインを全画面にする / 元に戻す
-        if key.code == KeyCode::Esc && key.modifiers.contains(KeyModifiers::SHIFT) {
-            self.toggle_zoom();
-            return Action::None;
-        }
+    }
 
+    /// コンテキストなし (どこでも有効) のバインドだけを対象に 1 打鍵を実行する。
+    fn run_global(&mut self, stroke: KeyStroke) -> Action {
+        match self.keymap.lookup(self.contexts(), &[stroke]) {
+            Lookup::Found {
+                command,
+                global: true,
+            } => self.run(command, &[stroke]),
+            _ => Action::None,
+        }
+    }
+
+    /// 割り当てのないキー列。
+    fn unbound(&mut self, keys: &[KeyStroke], key: KeyEvent) -> Action {
+        let Some((last, head)) = keys.split_last() else {
+            return Action::None;
+        };
         match self.mode {
+            Mode::Editing | Mode::Rename | Mode::Command => {
+                if head.is_empty() {
+                    if let KeyCode::Char(c) = key.code
+                        && !key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        self.insert_char(c);
+                    }
+                    return Action::None;
+                }
+                // 途中まで押したキーは文字として入力し、最後のキーを改めて処理する
+                for k in head {
+                    if let KeyCode::Char(c) = k.code
+                        && !k.mods.contains(KeyModifiers::CONTROL)
+                    {
+                        self.insert_char(c);
+                    }
+                }
+                self.process_key(key)
+            }
             Mode::Help => {
                 self.mode = Mode::Normal;
                 Action::None
             }
-            Mode::Rename => {
-                self.handle_rename_key(key);
-                Action::None
+            Mode::Normal | Mode::Visual => {
+                self.operator = None;
+                if head.is_empty() {
+                    Action::None
+                } else {
+                    // `g` などの後でも Ctrl+C などは効くようにする
+                    self.run_global(*last)
+                }
             }
-            Mode::Editing => {
-                self.handle_editing_key(key);
-                Action::None
-            }
-            Mode::Visual => {
-                self.handle_visual_key(key);
-                Action::None
-            }
-            Mode::Command => self.handle_command_key(key),
-            Mode::Normal => self.handle_normal_key(key),
         }
+    }
+
+    fn dispatch(&mut self, command: Command, global: bool, keys: &[KeyStroke]) -> Action {
+        // オペレータ (d / c / y) の後はモーションか、同じオペレータ (dd) だけを受け付ける
+        if !global && let Some((op, _)) = self.operator.take() {
+            if let Some(motion) = motion_of(command) {
+                self.operate(op, motion);
+            } else if operator_of(command) == Some(op) {
+                self.operate_lines(op, None);
+            }
+            return Action::None;
+        }
+        self.run(command, keys)
+    }
+
+    /// コマンドを実行する。`keys` はそのコマンドを呼び出したキー列。
+    fn run(&mut self, command: Command, keys: &[KeyStroke]) -> Action {
+        use Command as C;
+        match command {
+            C::AppQuit => return Action::Quit,
+            C::AppSend => return self.send(),
+            C::AppSave => return self.save(),
+            C::AppSaveAndQuit => {
+                self.commit();
+                return Action::SaveAndQuit(self.collection.clone());
+            }
+            C::AppOpenConfig => {
+                self.back_to_normal();
+                return Action::EditConfig;
+            }
+            C::AppShowHelp => {
+                self.back_to_normal();
+                self.mode = Mode::Help;
+            }
+            C::AppOpenCommandLine => {
+                self.back_to_normal();
+                self.command = TextEditor::single_line("");
+                self.mode = Mode::Command;
+            }
+
+            C::PaneFocusLeft => self.move_focus('h'),
+            C::PaneFocusDown => self.move_focus('j'),
+            C::PaneFocusUp => self.move_focus('k'),
+            C::PaneFocusRight => self.move_focus('l'),
+            C::PaneFocusNext => self.focus_pane(self.focus.next()),
+            C::PaneFocusPrev => self.focus_pane(self.focus.prev()),
+            C::PaneFocusCollection => self.focus_pane(Focus::Collection),
+            C::PaneFocusUrl => self.focus_pane(Focus::Url),
+            C::PaneFocusRequest => self.focus_pane(Focus::Request),
+            C::PaneFocusResponse => self.focus_pane(Focus::Response),
+            C::PaneToggleZoom => self.toggle_zoom(),
+
+            C::RequestNextMethod => self.method = self.method.next(),
+            C::RequestPrevMethod => self.method = self.method.prev(),
+
+            C::TabNext => self.cycle_tab(1),
+            C::TabPrev => self.cycle_tab(-1),
+            C::TabSelect1 => self.select_tab(0),
+            C::TabSelect2 => self.select_tab(1),
+            C::TabSelect3 => self.select_tab(2),
+            C::TabSelect4 => self.select_tab(3),
+
+            C::CollectionSelectNext => self.select(self.selected + 1),
+            C::CollectionSelectPrev => {
+                if self.selected > 0 {
+                    self.select(self.selected - 1);
+                }
+            }
+            C::CollectionSelectFirst => self.select(0),
+            C::CollectionSelectLast => self.select(self.collection.len() - 1),
+            C::CollectionNewBelow => {
+                self.commit();
+                self.collection
+                    .insert(self.selected + 1, Request::default());
+                self.select(self.selected + 1);
+                self.status = "新しいリクエストを追加しました".to_string();
+            }
+            C::CollectionNewAbove => {
+                self.commit();
+                self.collection.insert(self.selected, Request::default());
+                // select() は同じ index だと何もしないので直接読み込む
+                self.load_selected();
+                self.status = "新しいリクエストを追加しました".to_string();
+            }
+            C::CollectionYank => {
+                self.commit();
+                self.request_register = Some(self.collection[self.selected].clone());
+                self.status = format!(
+                    "「{}」をヤンクしました (p で貼り付け)",
+                    self.collection[self.selected].name
+                );
+            }
+            C::CollectionDelete => {
+                self.commit();
+                let removed = self.collection.remove(self.selected);
+                if self.collection.is_empty() {
+                    self.collection.push(Request::default());
+                }
+                self.selected = self.selected.min(self.collection.len() - 1);
+                self.load_selected();
+                self.status = format!("「{}」を削除しました (p で貼り付け)", removed.name);
+                self.request_register = Some(removed);
+            }
+            C::CollectionPasteAfter | C::CollectionPasteBefore => {
+                let Some(mut req) = self.request_register.clone() else {
+                    self.status = "ヤンクしたリクエストがありません (yy でヤンク)".to_string();
+                    return Action::None;
+                };
+                self.commit();
+                let at = if command == C::CollectionPasteAfter {
+                    self.selected + 1
+                } else {
+                    self.selected
+                };
+                if self.collection.iter().any(|r| r.name == req.name) {
+                    req.name = format!("{} (copy)", req.name);
+                }
+                self.collection.insert(at, req);
+                self.selected = at;
+                self.load_selected();
+                self.status = "リクエストを貼り付けました".to_string();
+            }
+            C::CollectionRename => {
+                self.back_to_normal();
+                self.rename = TextEditor::single_line(&self.collection[self.selected].name);
+                self.mode = Mode::Rename;
+            }
+
+            C::ResponseScrollDown => self.scroll_response_by(1),
+            C::ResponseScrollUp => self.scroll_response_by(-1),
+            C::ResponseHalfPageDown => self.scroll_response_by(self.page_size(true) as i32),
+            C::ResponseHalfPageUp => self.scroll_response_by(-(self.page_size(true) as i32)),
+            C::ResponsePageDown => self.scroll_response_by(self.page_size(false) as i32),
+            C::ResponsePageUp => self.scroll_response_by(-(self.page_size(false) as i32)),
+            // Body / Headers タブではカーソルごと移動する
+            C::ResponseScrollToTop | C::ResponseScrollToBottom
+                if self.response_view_id().is_some() =>
+            {
+                if self.focus == Focus::Response && self.mode != Mode::Editing {
+                    self.move_cursor(if command == C::ResponseScrollToTop {
+                        Motion::Top
+                    } else {
+                        Motion::Bottom
+                    });
+                }
+            }
+            C::ResponseScrollToTop => self.response_scroll = 0,
+            C::ResponseScrollToBottom => self.response_scroll = self.max_scroll(),
+
+            C::PreviewZoomIn | C::PreviewZoomOut | C::PreviewZoomReset => {
+                if self.preview_shown() {
+                    let step = PREVIEW_ZOOM_STEP as i32;
+                    self.set_preview_zoom(match command {
+                        C::PreviewZoomIn => self.preview_zoom as i32 + step,
+                        C::PreviewZoomOut => self.preview_zoom as i32 - step,
+                        _ => PREVIEW_ZOOM_DEFAULT as i32,
+                    });
+                }
+            }
+
+            C::VimMoveLeft
+            | C::VimMoveRight
+            | C::VimMoveUp
+            | C::VimMoveDown
+            | C::VimMoveWordForward
+            | C::VimMoveWordBackward
+            | C::VimMoveWordEnd
+            | C::VimMoveToLineStart
+            | C::VimMoveToFirstNonBlank
+            | C::VimMoveToLineEnd
+            | C::VimMoveToTop
+            | C::VimMoveToBottom
+            | C::VimInsert
+            | C::VimAppend
+            | C::VimInsertAtLineStart
+            | C::VimAppendAtLineEnd
+            | C::VimOpenLineBelow
+            | C::VimOpenLineAbove
+            | C::VimDeleteChar
+            | C::VimDeleteCharBefore
+            | C::VimDeleteToLineEnd
+            | C::VimChangeToLineEnd
+            | C::VimSubstituteChar
+            | C::VimSubstituteLine
+            | C::VimYankLine
+            | C::VimPasteAfter
+            | C::VimPasteBefore
+            | C::VimUndo
+            | C::VimReplaceChar
+            | C::VimDelete
+            | C::VimChange
+            | C::VimYank
+            | C::VimVisual
+            | C::VimVisualLine
+            | C::VimVisualSwapEnds => self.run_vim(command, keys),
+            C::VimNormalMode => match self.mode {
+                Mode::Editing => self.leave_insert(),
+                Mode::Visual => self.mode = Mode::Normal,
+                _ => {}
+            },
+
+            C::EditorBackspace
+            | C::EditorDelete
+            | C::EditorDeleteWordBefore
+            | C::EditorMoveLeft
+            | C::EditorMoveRight
+            | C::EditorMoveUp
+            | C::EditorMoveDown
+            | C::EditorMoveToLineStart
+            | C::EditorMoveToLineEnd
+            | C::EditorKillToLineEnd
+            | C::EditorClear
+            | C::EditorNewline => self.run_input(command),
+
+            C::CommandCancel => {
+                if self.mode == Mode::Command {
+                    self.mode = Mode::Normal;
+                }
+            }
+            C::CommandExecute => {
+                if self.mode == Mode::Command {
+                    self.mode = Mode::Normal;
+                    let cmd = self.command.text();
+                    return self.run_command(cmd.trim());
+                }
+            }
+            C::RenameCancel => {
+                if self.mode == Mode::Rename {
+                    self.mode = Mode::Normal;
+                }
+            }
+            C::RenameConfirm => {
+                if self.mode == Mode::Rename {
+                    let name = self.rename.text().trim().to_string();
+                    if !name.is_empty() {
+                        self.collection[self.selected].name = name;
+                    }
+                    self.mode = Mode::Normal;
+                }
+            }
+        }
+        Action::None
     }
 
     fn send(&mut self) -> Action {
@@ -969,35 +1266,48 @@ impl App {
         Action::Save(self.collection.clone())
     }
 
-    fn handle_rename_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Enter => {
-                let name = self.rename.text().trim().to_string();
-                if !name.is_empty() {
-                    self.collection[self.selected].name = name;
-                }
-                self.mode = Mode::Normal;
-            }
-            _ => edit_key(&mut self.rename, key),
+    /// 文字入力中のエディタ (Insert ならテキスト欄、Command / Rename ならその入力欄)。
+    fn input_editor(&mut self) -> Option<&mut TextEditor> {
+        match self.mode {
+            Mode::Editing => self.active_editor(),
+            Mode::Rename => Some(&mut self.rename),
+            Mode::Command => Some(&mut self.command),
+            Mode::Normal | Mode::Visual | Mode::Help => None,
         }
     }
 
-    fn handle_editing_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.leave_insert(),
-            KeyCode::Tab => {
-                self.leave_insert();
-                self.set_focus(self.focus.next());
-            }
-            KeyCode::Enter if self.focus == Focus::Url => self.leave_insert(),
-            _ => {
-                if let Some(ed) = self.active_editor() {
-                    edit_key(ed, key);
-                } else {
-                    self.mode = Mode::Normal;
-                }
-            }
+    fn insert_char(&mut self, c: char) {
+        match self.input_editor() {
+            Some(ed) => ed.insert_char(c),
+            None => self.mode = Mode::Normal,
+        }
+    }
+
+    /// 文字入力中の編集操作 (Insert モード / コマンドライン / 名前変更)。
+    fn run_input(&mut self, command: Command) {
+        use Command as C;
+        // 空のコマンドラインでの Backspace はキャンセル
+        if self.mode == Mode::Command && command == C::EditorBackspace && self.command.is_empty() {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let Some(ed) = self.input_editor() else {
+            return;
+        };
+        match command {
+            C::EditorBackspace => ed.backspace(),
+            C::EditorDelete => ed.delete(),
+            C::EditorDeleteWordBefore => ed.delete_word_before(),
+            C::EditorMoveLeft => ed.move_left(),
+            C::EditorMoveRight => ed.move_right(),
+            C::EditorMoveUp => ed.move_up(),
+            C::EditorMoveDown => ed.move_down(),
+            C::EditorMoveToLineStart => ed.move_home(),
+            C::EditorMoveToLineEnd => ed.move_end(),
+            C::EditorKillToLineEnd => ed.kill_to_end(),
+            C::EditorClear => ed.clear(),
+            C::EditorNewline => ed.insert_newline(),
+            _ => {}
         }
     }
 
@@ -1011,6 +1321,15 @@ impl App {
         self.commit();
     }
 
+    /// どのモードからでも Normal に戻す。
+    fn back_to_normal(&mut self) {
+        if self.mode == Mode::Editing {
+            self.leave_insert();
+        } else {
+            self.mode = Mode::Normal;
+        }
+    }
+
     /// Insert モードに入る。`checkpoint` が true なら undo 地点を作る。
     fn enter_insert(&mut self, checkpoint: bool) {
         if let Some(ed) = self.active_editor() {
@@ -1021,56 +1340,128 @@ impl App {
         }
     }
 
+    fn toggle_zoom(&mut self) {
+        self.zoomed = !self.zoomed;
+        self.status = if self.zoomed {
+            "全画面表示 (Shift+Esc / Ctrl+W z で戻る)".to_string()
+        } else {
+            "全画面表示を解除しました".to_string()
+        };
+    }
+
+    fn set_focus(&mut self, focus: Focus) {
+        self.focus = focus;
+        if focus != Focus::Collection {
+            self.last_right_focus = focus;
+        }
+    }
+
+    /// キー操作でのペイン移動。Insert 中なら Normal に戻してから移動する。
+    fn focus_pane(&mut self, focus: Focus) {
+        match self.mode {
+            Mode::Editing => self.leave_insert(),
+            Mode::Normal => {}
+            Mode::Visual | Mode::Command | Mode::Rename | Mode::Help => return,
+        }
+        self.set_focus(focus);
+    }
+
+    /// Vim のウィンドウ移動 (Ctrl+H/J/K/L, Ctrl+W h/j/k/l)。
+    fn move_focus(&mut self, dir: char) {
+        let target = match dir {
+            'h' => (self.focus != Focus::Collection).then_some(Focus::Collection),
+            'l' => (self.focus == Focus::Collection).then_some(self.last_right_focus),
+            'j' => self.focus.below(),
+            'k' => self.focus.above(),
+            _ => None,
+        };
+        if let Some(f) = target {
+            self.focus_pane(f);
+        }
+    }
+
+    /// `:` コマンドを実行する。
+    fn run_command(&mut self, cmd: &str) -> Action {
+        match cmd {
+            "" => Action::None,
+            "w" | "write" => self.save(),
+            "q" | "q!" | "quit" | "qa" | "qa!" => Action::Quit,
+            "wq" | "x" | "xa" | "wqa" => {
+                self.commit();
+                Action::SaveAndQuit(self.collection.clone())
+            }
+            "send" | "s" => self.send(),
+            "h" | "help" => {
+                self.mode = Mode::Help;
+                Action::None
+            }
+            "config" | "keymap" => Action::EditConfig,
+            _ => {
+                self.status = format!("不明なコマンド: :{cmd}");
+                Action::None
+            }
+        }
+    }
+
+    /// 1 ページ (half なら半ページ) 分の行数。
+    fn page_size(&self, half: bool) -> u16 {
+        let h = self.response_height.get().max(2);
+        if half { h / 2 } else { h }
+    }
+
+    fn cycle_tab(&mut self, delta: isize) {
+        match self.focus {
+            Focus::Request => self.request_tab = self.request_tab.cycle(delta),
+            Focus::Response => {
+                let tabs = self.response_tabs();
+                let len = tabs.len() as isize;
+                let cur = tabs
+                    .iter()
+                    .position(|t| *t == self.response_tab)
+                    .unwrap_or(0) as isize;
+                self.set_response_tab(tabs[(cur + delta).rem_euclid(len) as usize]);
+            }
+            _ => {}
+        }
+    }
+
+    /// フォーカス中のペインの `index` 番目 (0 始まり) のタブを選ぶ。
+    fn select_tab(&mut self, index: usize) {
+        match self.focus {
+            Focus::Request => {
+                if let Some(tab) = RequestTab::ALL.get(index) {
+                    self.request_tab = *tab;
+                }
+            }
+            Focus::Response => {
+                let tabs = [
+                    ResponseTab::Body,
+                    ResponseTab::Headers,
+                    ResponseTab::Preview,
+                ];
+                if let Some(tab) = tabs.get(index) {
+                    self.set_response_tab(*tab);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scroll_response_by(&mut self, delta: i32) {
+        if let Some(id) = self.response_view_id() {
+            self.scroll_view(id, delta);
+            return;
+        }
+        let next = (self.response_scroll as i32 + delta).clamp(0, self.max_scroll() as i32);
+        self.response_scroll = next as u16;
+    }
+
     /// Visual モードに入る (`v` / `V`)。
     fn enter_visual(&mut self, linewise: bool) {
         if let Some(ed) = self.active_text() {
             let anchor = ed.cursor();
             self.visual = Visual { anchor, linewise };
             self.mode = Mode::Visual;
-        }
-    }
-
-    /// Visual モード: カーソル移動で範囲を決め、`y` でコピーする。文字列は変更できない。
-    fn handle_visual_key(&mut self, key: KeyEvent) {
-        let pending = std::mem::take(&mut self.pending);
-        if key.code == KeyCode::Esc || self.active_text().is_none() {
-            self.mode = Mode::Normal;
-            return;
-        }
-        if pending == Pending::G {
-            if key.code == KeyCode::Char('g') {
-                self.goto_top();
-            }
-            return;
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.handle_scroll_key(key);
-            return;
-        }
-        if let Some(motion) = Motion::from_key(key.code) {
-            self.move_cursor(motion);
-            return;
-        }
-        match key.code {
-            KeyCode::Char('g') => self.pending = Pending::G,
-            KeyCode::Char('v') if self.visual.linewise => self.visual.linewise = false,
-            KeyCode::Char('V') if !self.visual.linewise => self.visual.linewise = true,
-            KeyCode::Char('v' | 'V') => self.mode = Mode::Normal,
-            // 選択の反対側の端にカーソルを移す
-            KeyCode::Char('o') => {
-                let anchor = self.visual.anchor;
-                if let Some(ed) = self.active_text() {
-                    let cursor = ed.cursor();
-                    ed.set_cursor(anchor.0, anchor.1);
-                    ed.clamp_normal();
-                    self.visual.anchor = cursor;
-                }
-                self.follow_cursor();
-            }
-            KeyCode::Char('y') => self.yank_selection(),
-            KeyCode::PageDown => self.scroll_response(self.page_size(false) as i32),
-            KeyCode::PageUp => self.scroll_response(-(self.page_size(false) as i32)),
-            _ => {}
         }
     }
 
@@ -1129,22 +1520,6 @@ impl App {
         self.follow_cursor();
     }
 
-    /// 読み取り専用ビュー (cURL / Response) での Normal モード操作。
-    /// 移動と選択・ヤンクだけを受け付け、文字列を変えるキーは無視する。
-    fn handle_view_normal_key(&mut self, key: KeyEvent) {
-        if let Some(motion) = Motion::from_key(key.code) {
-            self.move_cursor(motion);
-            return;
-        }
-        match key.code {
-            KeyCode::Char('v') => self.enter_visual(false),
-            KeyCode::Char('V') => self.enter_visual(true),
-            KeyCode::Char('y') => self.pending = Pending::Op(Operator::Yank),
-            KeyCode::Char('Y') => self.operate_lines(Operator::Yank, None),
-            _ => {}
-        }
-    }
-
     /// オペレータの対象。ヤンクは読み取り専用ビューでもできる。
     fn operand(&mut self, op: Operator) -> Option<&mut TextEditor> {
         match op {
@@ -1153,323 +1528,68 @@ impl App {
         }
     }
 
-    /// Ctrl+D / U / F / B / E / Y (Response のスクロール)。
-    fn handle_scroll_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('d') => self.scroll_response(self.page_size(true) as i32),
-            KeyCode::Char('u') => self.scroll_response(-(self.page_size(true) as i32)),
-            KeyCode::Char('f') => self.scroll_response(self.page_size(false) as i32),
-            KeyCode::Char('b') => self.scroll_response(-(self.page_size(false) as i32)),
-            KeyCode::Char('e') => self.scroll_response(1),
-            KeyCode::Char('y') => self.scroll_response(-1),
-            _ => {}
+    /// Visual モードでのコマンド。カーソル移動で範囲を決め、ヤンクでコピーする。
+    /// 文字列を変えるコマンドは受け付けない。
+    fn run_visual(&mut self, command: Command) {
+        use Command as C;
+        if self.active_text().is_none() {
+            self.mode = Mode::Normal;
+            return;
         }
-    }
-
-    fn toggle_zoom(&mut self) {
-        self.zoomed = !self.zoomed;
-        self.status = if self.zoomed {
-            "全画面表示 (Shift+Esc / Ctrl+W z で戻る)".to_string()
-        } else {
-            "全画面表示を解除しました".to_string()
-        };
-    }
-
-    fn set_focus(&mut self, focus: Focus) {
-        self.focus = focus;
-        if focus != Focus::Collection {
-            self.last_right_focus = focus;
+        if let Some(motion) = motion_of(command) {
+            self.move_cursor(motion);
+            return;
         }
-    }
-
-    /// Vim のウィンドウ移動 (Ctrl+H/J/K/L, Ctrl+W h/j/k/l)。
-    fn move_focus(&mut self, dir: char) {
-        let target = match dir {
-            'h' => (self.focus != Focus::Collection).then_some(Focus::Collection),
-            'l' => (self.focus == Focus::Collection).then_some(self.last_right_focus),
-            'j' => self.focus.below(),
-            'k' => self.focus.above(),
-            _ => None,
-        };
-        if let Some(f) = target {
-            self.set_focus(f);
-        }
-    }
-
-    fn handle_window_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) => self.move_focus(c),
-            KeyCode::Left => self.move_focus('h'),
-            KeyCode::Down => self.move_focus('j'),
-            KeyCode::Up => self.move_focus('k'),
-            KeyCode::Right => self.move_focus('l'),
-            KeyCode::Char('w') => self.set_focus(self.focus.next()),
-            KeyCode::Char('W') => self.set_focus(self.focus.prev()),
-            KeyCode::Char('t') => self.set_focus(Focus::Collection),
-            KeyCode::Char('b') => self.set_focus(Focus::Response),
-            KeyCode::Char('z') => self.toggle_zoom(),
-            _ => {}
-        }
-    }
-
-    fn handle_command_key(&mut self, key: KeyEvent) -> Action {
-        match key.code {
-            KeyCode::Esc => self.mode = Mode::Normal,
-            KeyCode::Enter => {
-                self.mode = Mode::Normal;
-                let cmd = self.command.text();
-                return self.run_command(cmd.trim());
-            }
-            KeyCode::Backspace if self.command.is_empty() => self.mode = Mode::Normal,
-            _ => edit_key(&mut self.command, key),
-        }
-        Action::None
-    }
-
-    /// `:` コマンドを実行する。
-    fn run_command(&mut self, cmd: &str) -> Action {
-        match cmd {
-            "" => Action::None,
-            "w" | "write" => self.save(),
-            "q" | "q!" | "quit" | "qa" | "qa!" => Action::Quit,
-            "wq" | "x" | "xa" | "wqa" => {
-                self.commit();
-                Action::SaveAndQuit(self.collection.clone())
-            }
-            "send" | "s" => self.send(),
-            "h" | "help" => {
-                self.mode = Mode::Help;
-                Action::None
-            }
-            _ => {
-                self.status = format!("不明なコマンド: :{cmd}");
-                Action::None
-            }
-        }
-    }
-
-    /// 1 ページ (half なら半ページ) 分の行数。
-    fn page_size(&self, half: bool) -> u16 {
-        let h = self.response_height.get().max(2);
-        if half { h / 2 } else { h }
-    }
-
-    fn cycle_tab(&mut self, delta: isize) {
-        match self.focus {
-            Focus::Request => self.request_tab = self.request_tab.cycle(delta),
-            Focus::Response => {
-                let tabs = self.response_tabs();
-                let len = tabs.len() as isize;
-                let cur = tabs
-                    .iter()
-                    .position(|t| *t == self.response_tab)
-                    .unwrap_or(0) as isize;
-                self.set_response_tab(tabs[(cur + delta).rem_euclid(len) as usize]);
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_normal_key(&mut self, key: KeyEvent) -> Action {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let pending = std::mem::take(&mut self.pending);
-        if key.code == KeyCode::Esc {
-            return Action::None;
-        }
-        match pending {
-            Pending::None => {}
-            Pending::Window => {
-                // Ctrl+W Ctrl+W / Ctrl+W Ctrl+H なども受け付ける
-                match key.code {
-                    KeyCode::Char('w') if ctrl => self.set_focus(self.focus.next()),
-                    _ => self.handle_window_key(key),
-                }
-                return Action::None;
-            }
-            Pending::G => {
-                match key.code {
-                    KeyCode::Char('t') => self.cycle_tab(1),
-                    KeyCode::Char('T') => self.cycle_tab(-1),
-                    KeyCode::Char('g') => self.goto_top(),
-                    _ => {}
-                }
-                return Action::None;
-            }
-            Pending::Op(_) | Pending::OpG(_) | Pending::Replace => {
-                self.handle_pending_edit(pending, key);
-                return Action::None;
-            }
-        }
-
-        if ctrl {
-            match key.code {
-                KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) => self.move_focus(c),
-                KeyCode::Char('w') => self.pending = Pending::Window,
-                _ => self.handle_scroll_key(key),
-            }
-            return Action::None;
-        }
-
-        match key.code {
-            KeyCode::Char('q') => return Action::Quit,
-            KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Char(':') => {
-                self.command = TextEditor::single_line("");
-                self.mode = Mode::Command;
-            }
-            KeyCode::Tab => self.set_focus(self.focus.next()),
-            KeyCode::BackTab => self.set_focus(self.focus.prev()),
-            KeyCode::Char('m') => self.method = self.method.next(),
-            KeyCode::Char('M') => self.method = self.method.prev(),
-            KeyCode::Char('H') => self.cycle_tab(-1),
-            KeyCode::Char('L') => self.cycle_tab(1),
-            KeyCode::Char('g') => self.pending = Pending::G,
-            KeyCode::Char(c @ '1'..='4') if self.focus == Focus::Request => {
-                self.request_tab = RequestTab::ALL[(c as u8 - b'1') as usize];
-            }
-            KeyCode::Char('1') if self.focus == Focus::Response => {
-                self.set_response_tab(ResponseTab::Body)
-            }
-            KeyCode::Char('2') if self.focus == Focus::Response => {
-                self.set_response_tab(ResponseTab::Headers)
-            }
-            KeyCode::Char('3') if self.focus == Focus::Response => {
-                self.set_response_tab(ResponseTab::Preview)
-            }
-            _ => match self.focus {
-                Focus::Collection => self.handle_collection_key(key),
-                Focus::Response => self.handle_response_key(key),
-                Focus::Url | Focus::Request => self.handle_editor_normal_key(key),
-            },
-        }
-        Action::None
-    }
-
-    /// `gg`
-    fn goto_top(&mut self) {
-        match self.focus {
-            Focus::Collection => self.select(0),
-            _ => {
+        match command {
+            C::VimVisual if self.visual.linewise => self.visual.linewise = false,
+            C::VimVisualLine if !self.visual.linewise => self.visual.linewise = true,
+            C::VimVisual | C::VimVisualLine => self.mode = Mode::Normal,
+            // 選択の反対側の端にカーソルを移す
+            C::VimVisualSwapEnds => {
+                let anchor = self.visual.anchor;
                 if let Some(ed) = self.active_text() {
-                    ed.set_cursor(0, 0);
-                    let col = ed.first_non_blank_col(0);
-                    ed.set_cursor(0, col);
+                    let cursor = ed.cursor();
+                    ed.set_cursor(anchor.0, anchor.1);
                     ed.clamp_normal();
-                    self.follow_cursor();
-                } else if self.focus == Focus::Response {
-                    self.response_scroll = 0;
+                    self.visual.anchor = cursor;
                 }
+                self.follow_cursor();
             }
-        }
-    }
-
-    fn scroll_response(&mut self, delta: i32) {
-        if self.focus == Focus::Response {
-            self.scroll_response_by(delta);
-        }
-    }
-
-    fn scroll_response_by(&mut self, delta: i32) {
-        if let Some(id) = self.response_view_id() {
-            self.scroll_view(id, delta);
-            return;
-        }
-        let next = (self.response_scroll as i32 + delta).clamp(0, self.max_scroll() as i32);
-        self.response_scroll = next as u16;
-    }
-
-    fn handle_collection_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.selected > 0 {
-                    self.select(self.selected - 1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => self.select(self.selected + 1),
-            KeyCode::Char('G') => self.select(self.collection.len() - 1),
-            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
-                self.set_focus(self.last_right_focus)
-            }
-            KeyCode::Char('n') | KeyCode::Char('o') => {
-                self.commit();
-                self.collection
-                    .insert(self.selected + 1, Request::default());
-                self.select(self.selected + 1);
-                self.status = "新しいリクエストを追加しました".to_string();
-            }
-            KeyCode::Char('O') => {
-                self.commit();
-                self.collection.insert(self.selected, Request::default());
-                // select() は同じ index だと何もしないので直接読み込む
-                self.load_selected();
-                self.status = "新しいリクエストを追加しました".to_string();
-            }
-            KeyCode::Char('y') => self.pending = Pending::Op(Operator::Yank),
-            KeyCode::Char('d') => self.pending = Pending::Op(Operator::Delete),
-            KeyCode::Char('p') | KeyCode::Char('P') => {
-                let Some(mut req) = self.request_register.clone() else {
-                    self.status = "ヤンクしたリクエストがありません (yy でヤンク)".to_string();
-                    return;
-                };
-                self.commit();
-                let at = if key.code == KeyCode::Char('p') {
-                    self.selected + 1
-                } else {
-                    self.selected
-                };
-                if self.collection.iter().any(|r| r.name == req.name) {
-                    req.name = format!("{} (copy)", req.name);
-                }
-                self.collection.insert(at, req);
-                self.selected = at;
-                self.load_selected();
-                self.status = "リクエストを貼り付けました".to_string();
-            }
-            KeyCode::Char('r') => {
-                self.rename = TextEditor::single_line(&self.collection[self.selected].name);
-                self.mode = Mode::Rename;
-            }
+            C::VimYank => self.yank_selection(),
             _ => {}
         }
     }
 
-    /// Collection での dd / yy。
-    fn collection_operator(&mut self, op: Operator, key: KeyEvent) {
-        if key.code != KeyCode::Char(op.as_char()) {
+    /// テキスト欄 (URL / Params / Headers / Body) と読み取り専用ビューでの Normal モード操作。
+    fn run_vim(&mut self, command: Command, keys: &[KeyStroke]) {
+        use Command as C;
+        if self.mode == Mode::Visual {
+            self.run_visual(command);
             return;
         }
-        self.commit();
-        match op {
-            Operator::Yank => {
-                self.request_register = Some(self.collection[self.selected].clone());
-                self.status = format!(
-                    "「{}」をヤンクしました (p で貼り付け)",
-                    self.collection[self.selected].name
-                );
-            }
-            Operator::Delete => {
-                let removed = self.collection.remove(self.selected);
-                if self.collection.is_empty() {
-                    self.collection.push(Request::default());
-                }
-                self.selected = self.selected.min(self.collection.len() - 1);
-                self.load_selected();
-                self.status = format!("「{}」を削除しました (p で貼り付け)", removed.name);
-                self.request_register = Some(removed);
-            }
-            Operator::Change => {}
+        if self.mode != Mode::Normal {
+            return;
         }
-    }
-
-    /// テキスト欄 (URL / Params / Headers / Body) での Normal モード操作。
-    fn handle_editor_normal_key(&mut self, key: KeyEvent) {
+        if let Some(motion) = motion_of(command) {
+            self.move_cursor(motion);
+            return;
+        }
+        let shown: String = keys.iter().map(|k| k.short()).collect();
+        match command {
+            C::VimVisual | C::VimVisualLine => {
+                self.enter_visual(command == C::VimVisualLine);
+                return;
+            }
+            C::VimYankLine => {
+                self.operate_lines(Operator::Yank, None);
+                return;
+            }
+            _ => {}
+        }
+        // 読み取り専用ビュー (cURL / Response) ではヤンクだけ。文字列を変えるコマンドは無視する
         if self.focused_view().is_some() {
-            self.handle_view_normal_key(key);
-            return;
-        }
-        if let Some(motion) = Motion::from_key(key.code) {
-            if let Some(ed) = self.active_editor() {
-                apply_motion(ed, motion);
+            if command == C::VimYank {
+                self.operator = Some((Operator::Yank, shown));
             }
             return;
         }
@@ -1477,31 +1597,31 @@ impl App {
         let Some(ed) = self.active_editor() else {
             return;
         };
-        match key.code {
-            KeyCode::Char('i') => {}
-            KeyCode::Char('a') => {
+        match command {
+            C::VimInsert => {}
+            C::VimAppend => {
                 if ed.line_len(ed.cursor().0) > 0 {
                     ed.move_right();
                 }
             }
-            KeyCode::Char('I') => {
+            C::VimInsertAtLineStart => {
                 let row = ed.cursor().0;
                 let col = ed.first_non_blank_col(row);
                 ed.set_cursor(row, col);
             }
-            KeyCode::Char('A') | KeyCode::Enter => ed.move_end(),
-            KeyCode::Char('o') | KeyCode::Char('O') => {
+            C::VimAppendAtLineEnd => ed.move_end(),
+            C::VimOpenLineBelow | C::VimOpenLineAbove => {
                 ed.checkpoint();
                 if ed.is_multiline() {
                     let row = ed.cursor().0;
-                    ed.insert_lines(row, key.code == KeyCode::Char('O'), "");
+                    ed.insert_lines(row, command == C::VimOpenLineAbove, "");
                 } else {
                     ed.move_end();
                 }
                 self.enter_insert(false);
                 return;
             }
-            KeyCode::Char('x') | KeyCode::Delete => {
+            C::VimDeleteChar => {
                 let (row, col) = ed.cursor();
                 if col < ed.line_len(row) {
                     ed.checkpoint();
@@ -1515,7 +1635,7 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Char('X') => {
+            C::VimDeleteCharBefore => {
                 let (row, col) = ed.cursor();
                 if col > 0 {
                     ed.checkpoint();
@@ -1528,15 +1648,15 @@ impl App {
                 }
                 return;
             }
-            KeyCode::Char('D') => {
+            C::VimDeleteToLineEnd => {
                 self.operate(Operator::Delete, Motion::LineEnd);
                 return;
             }
-            KeyCode::Char('C') => {
+            C::VimChangeToLineEnd => {
                 self.operate(Operator::Change, Motion::LineEnd);
                 return;
             }
-            KeyCode::Char('s') => {
+            C::VimSubstituteChar => {
                 let (row, col) = ed.cursor();
                 ed.checkpoint();
                 if col < ed.line_len(row) {
@@ -1549,7 +1669,7 @@ impl App {
                 self.enter_insert(false);
                 return;
             }
-            KeyCode::Char('S') => {
+            C::VimSubstituteLine => {
                 ed.checkpoint();
                 let text = ed.clear_line();
                 self.register = Register {
@@ -1559,16 +1679,8 @@ impl App {
                 self.enter_insert(false);
                 return;
             }
-            KeyCode::Char('Y') => {
-                self.operate_lines(Operator::Yank, None);
-                return;
-            }
-            KeyCode::Char(c @ ('v' | 'V')) => {
-                self.enter_visual(c == 'V');
-                return;
-            }
-            KeyCode::Char('p') | KeyCode::Char('P') => {
-                let before = key.code == KeyCode::Char('P');
+            C::VimPasteAfter | C::VimPasteBefore => {
+                let before = command == C::VimPasteBefore;
                 if reg.text.is_empty() {
                     return;
                 }
@@ -1587,60 +1699,38 @@ impl App {
                 self.commit();
                 return;
             }
-            KeyCode::Char('u') => {
+            C::VimUndo => {
                 if !ed.undo() {
                     self.status = "これ以上元に戻せません".to_string();
                 }
                 self.commit();
                 return;
             }
-            KeyCode::Char('r') => {
-                self.pending = Pending::Replace;
+            C::VimReplaceChar => {
+                self.replace = Some(shown);
                 return;
             }
-            KeyCode::Char(c @ ('d' | 'c' | 'y')) => {
-                self.pending = Pending::Op(Operator::from_char(c).unwrap());
+            C::VimDelete | C::VimChange | C::VimYank => {
+                self.operator = operator_of(command).map(|op| (op, shown));
                 return;
             }
             _ => return,
         }
-        // ここに来るのは Insert モードに入るキー (i / a / I / A / Enter)
+        // ここに来るのは Insert モードに入るコマンド (i / a / I / A)
         self.enter_insert(true);
     }
 
-    /// オペレータ / r の 2 打鍵目。
-    fn handle_pending_edit(&mut self, pending: Pending, key: KeyEvent) {
-        match pending {
-            Pending::Op(op) if self.focus == Focus::Collection => self.collection_operator(op, key),
-            Pending::Op(op) => match key.code {
-                KeyCode::Char(c) if c == op.as_char() => self.operate_lines(op, None),
-                KeyCode::Char('g') => self.pending = Pending::OpG(op),
-                code => {
-                    if let Some(m) = Motion::from_key(code) {
-                        self.operate(op, m);
-                    }
-                }
-            },
-            Pending::OpG(op) => {
-                if key.code == KeyCode::Char('g') {
-                    self.operate(op, Motion::Top);
-                }
+    /// `r` の後に押された文字で、カーソル位置の 1 文字を置き換える。
+    fn replace_char(&mut self, c: char) {
+        if let Some(ed) = self.active_editor() {
+            let (row, col) = ed.cursor();
+            if col < ed.line_len(row) {
+                ed.checkpoint();
+                ed.delete_range((row, col), (row, col + 1));
+                ed.insert_char(c);
+                ed.set_cursor(row, col);
+                self.commit();
             }
-            Pending::Replace => {
-                if let KeyCode::Char(c) = key.code
-                    && let Some(ed) = self.active_editor()
-                {
-                    let (row, col) = ed.cursor();
-                    if col < ed.line_len(row) {
-                        ed.checkpoint();
-                        ed.delete_range((row, col), (row, col + 1));
-                        ed.insert_char(c);
-                        ed.set_cursor(row, col);
-                        self.commit();
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -1765,41 +1855,17 @@ impl App {
 
     /// ステータス行に表示する入力途中のキー。
     pub fn pending_keys(&self) -> String {
-        match self.pending {
-            Pending::None => String::new(),
-            Pending::G => "g".into(),
-            Pending::Window => "^W".into(),
-            Pending::Op(op) => op.as_char().to_string(),
-            Pending::OpG(op) => format!("{}g", op.as_char()),
-            Pending::Replace => "r".into(),
+        let mut shown = String::new();
+        if let Some((_, keys)) = &self.operator {
+            shown.push_str(keys);
         }
-    }
-
-    fn handle_response_key(&mut self, key: KeyEvent) {
-        if self.handle_preview_zoom_key(key) {
-            return;
+        if let Some(keys) = &self.replace {
+            shown.push_str(keys);
         }
-        match key.code {
-            KeyCode::PageDown => return self.scroll_response(self.page_size(false) as i32),
-            KeyCode::PageUp => return self.scroll_response(-(self.page_size(false) as i32)),
-            _ => {}
+        for key in &self.keys {
+            shown.push_str(&key.short());
         }
-        // Body / Headers タブ: カーソル移動と選択・コピー
-        if self.focused_view().is_some() {
-            if key.code == KeyCode::Enter {
-                self.move_cursor(Motion::Down);
-            } else {
-                self.handle_view_normal_key(key);
-            }
-            return;
-        }
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => self.scroll_response(1),
-            KeyCode::Up | KeyCode::Char('k') => self.scroll_response(-1),
-            KeyCode::Home => self.response_scroll = 0,
-            KeyCode::Char('G') | KeyCode::End => self.response_scroll = self.max_scroll(),
-            _ => {}
-        }
+        shown
     }
 
     /// Preview タブでスクロールできる行数 (画像は最後まで表示したところで止める)。
@@ -1846,27 +1912,31 @@ fn apply_motion(ed: &mut TextEditor, motion: Motion) {
     ed.clamp_normal();
 }
 
-/// エディタ共通のキー操作 (Insert モード / コマンドライン / 名前変更)。
-fn edit_key(ed: &mut TextEditor, key: KeyEvent) {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Char('h') if ctrl => ed.backspace(),
-        KeyCode::Char('w') if ctrl => ed.delete_word_before(),
-        KeyCode::Char('a') if ctrl => ed.move_home(),
-        KeyCode::Char('e') if ctrl => ed.move_end(),
-        KeyCode::Char('k') if ctrl => ed.kill_to_end(),
-        KeyCode::Char('u') if ctrl => ed.clear(),
-        KeyCode::Char(c) if !ctrl => ed.insert_char(c),
-        KeyCode::Enter => ed.insert_newline(),
-        KeyCode::Backspace => ed.backspace(),
-        KeyCode::Delete => ed.delete(),
-        KeyCode::Left => ed.move_left(),
-        KeyCode::Right => ed.move_right(),
-        KeyCode::Up => ed.move_up(),
-        KeyCode::Down => ed.move_down(),
-        KeyCode::Home => ed.move_home(),
-        KeyCode::End => ed.move_end(),
-        _ => {}
+/// モーションのコマンドなら、その移動。
+fn motion_of(command: Command) -> Option<Motion> {
+    Some(match command {
+        Command::VimMoveLeft => Motion::Left,
+        Command::VimMoveRight => Motion::Right,
+        Command::VimMoveUp => Motion::Up,
+        Command::VimMoveDown => Motion::Down,
+        Command::VimMoveWordForward => Motion::WordForward,
+        Command::VimMoveWordBackward => Motion::WordBackward,
+        Command::VimMoveWordEnd => Motion::WordEnd,
+        Command::VimMoveToLineStart => Motion::LineStart,
+        Command::VimMoveToFirstNonBlank => Motion::FirstNonBlank,
+        Command::VimMoveToLineEnd => Motion::LineEnd,
+        Command::VimMoveToTop => Motion::Top,
+        Command::VimMoveToBottom => Motion::Bottom,
+        _ => return None,
+    })
+}
+
+fn operator_of(command: Command) -> Option<Operator> {
+    match command {
+        Command::VimDelete => Some(Operator::Delete),
+        Command::VimChange => Some(Operator::Change),
+        Command::VimYank => Some(Operator::Yank),
+        _ => None,
     }
 }
 
@@ -2471,6 +2541,96 @@ mod tests {
         assert_eq!(app.url.text(), "https://httpbin.org/get");
     }
 
+    fn app_with_config(config: &str) -> App {
+        let mut app = App::new(vec![Request {
+            url: "http://a".into(),
+            ..Default::default()
+        }]);
+        app.set_keymap(crate::config::parse(config).unwrap());
+        app
+    }
+
+    #[test]
+    fn config_command_requests_editor() {
+        let mut app = App::new(vec![]);
+        type_str(&mut app, ":config");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::EditConfig);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn custom_bindings_add_override_and_disable() {
+        let mut app = app_with_config(
+            r#"{ "keymap": [
+                { "context": "Normal", "bindings": {
+                    "q": null,
+                    "space w": "app::Save",
+                    "ctrl-g": "app::Send",
+                    "f2": "app::OpenConfig"
+                } },
+                { "context": "Normal && Collection", "bindings": { "x": "collection::Delete" } }
+            ] }"#,
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Action::None);
+        // 既定のキーは残る
+        assert_eq!(app.handle_key(ctrl('c')), Action::Quit);
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.pending_keys(), "<space>");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('w'))),
+            Action::Save(_)
+        ));
+        // Space は右移動 (既定) ではなくキー列の 1 打鍵目として使われた
+        assert_eq!(app.url.cursor(), (0, 7));
+        assert_eq!(app.handle_key(key(KeyCode::F(2))), Action::EditConfig);
+        assert!(matches!(app.handle_key(ctrl('g')), Action::Send(_)));
+
+        // コンテキストが合うときだけ効く: URL では x は 1 文字削除のまま
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(app.url.text(), "http://");
+        assert_eq!(app.collection.len(), 1);
+        app.handle_key(ctrl('h'));
+        app.handle_key(key(KeyCode::Char('o')));
+        assert_eq!(app.collection.len(), 2);
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(app.collection.len(), 1);
+    }
+
+    #[test]
+    fn custom_sequence_in_insert_mode() {
+        let mut app = app_with_config(
+            r#"{ "keymap": [ { "context": "Insert", "bindings": { "j k": "vim::NormalMode" } } ] }"#,
+        );
+        app.handle_key(key(KeyCode::Char('A')));
+        type_str(&mut app, "jxjjk");
+        // 続きが来なかった j は普通の文字として入力される
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.url.text(), "http://ajxj");
+    }
+
+    #[test]
+    fn operators_follow_rebound_keys() {
+        // d を無効にして x をオペレータに、L を行末へのモーションにする
+        let mut app = app_with_config(
+            r#"{ "keymap": [ { "context": "Normal && Editor", "bindings": {
+                "d": null,
+                "x": "vim::Delete",
+                "shift-l": "vim::MoveToLineEnd"
+            } } ] }"#,
+        );
+        type_str(&mut app, "0wd");
+        assert_eq!(app.pending_keys(), "");
+        type_str(&mut app, "x");
+        assert_eq!(app.pending_keys(), "x");
+        type_str(&mut app, "L");
+        assert_eq!(app.url.text(), "http");
+        type_str(&mut app, "xx");
+        assert_eq!(app.url.text(), "");
+        // g の途中でも Ctrl+C は効く
+        type_str(&mut app, "g");
+        assert_eq!(app.handle_key(ctrl('c')), Action::Quit);
+    }
+
     fn copied(action: Action) -> String {
         match action {
             Action::Copy(text) => text,
@@ -2628,5 +2788,45 @@ mod tests {
         app.set_response(Err("boom".into()));
         type_str(&mut app, "v");
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn user_bindings_cannot_edit_read_only_views() {
+        use crate::keymap::Section;
+        // 読み取り専用ビューや Visual モードに編集コマンドを割り当てても効かない
+        let bindings = [
+            "vim::DeleteChar",
+            "vim::Delete",
+            "vim::PasteAfter",
+            "vim::Insert",
+        ]
+        .iter()
+        .zip(["x", "d", "p", "i"])
+        .map(|(command, key)| (key.to_string(), Some(command.to_string())))
+        .collect::<Vec<_>>();
+        let keymap = Keymap::with_user(&[
+            Section {
+                context: "Normal && TextView".into(),
+                bindings: bindings.clone(),
+            },
+            Section {
+                context: "Visual".into(),
+                bindings,
+            },
+        ])
+        .unwrap();
+        let mut app = App::new(vec![]);
+        app.set_keymap(keymap);
+        app.set_response(Ok(sample_response("hello world")));
+        app.focus = Focus::Response;
+        app.register = Register {
+            text: "zzz".into(),
+            linewise: false,
+        };
+        type_str(&mut app, "xdwpi");
+        assert_eq!(app.mode, Mode::Normal);
+        type_str(&mut app, "vexdpi");
+        assert_eq!(app.mode, Mode::Visual);
+        assert_eq!(app.response_body_view.text(), "hello world");
     }
 }
