@@ -43,6 +43,13 @@ async fn main() -> Result<()> {
     };
     let requests = collection::load(&path)?;
     let mut app = App::new(requests);
+    if let Some(zoom) = std::env::var("CURL_TUI_PREVIEW_ZOOM")
+        .ok()
+        .and_then(|v| v.trim().trim_end_matches('%').parse::<i32>().ok())
+    {
+        app.set_preview_zoom(zoom);
+        app.status.clear();
+    }
     let config_path = config::default_path();
     match config::load(&config_path) {
         Ok(keymap) => app.set_keymap(keymap),
@@ -159,8 +166,8 @@ async fn run(
     let client = http::build_client(Duration::from_secs(30))?;
     let (tx, mut rx) = mpsc::unbounded_channel::<Result<Response, String>>();
     let (ptx, mut prx) = mpsc::unbounded_channel::<PreviewResult>();
-    // 画像のピクセル高さ (スクロール範囲の計算用) と、現在の表示位置
-    let mut image_height = 0u32;
+    // 画像のピクセルサイズ (表示範囲の計算用) と、現在の表示位置
+    let mut image_size = (0u32, 0u32);
     let mut placed: Option<kitty::Placement> = None;
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
@@ -182,7 +189,7 @@ async fn run(
         if let Some(browser) = &browser {
             let (cell_w, cell_h) = cell_size();
             start_preview(app, browser, cell_w, cell_h, &ptx);
-            update_placement(app, image_height, cell_w, cell_h, &mut placed)?;
+            update_placement(app, image_size, cell_w, cell_h, &mut placed)?;
         }
 
         let mut open_config = false;
@@ -230,7 +237,7 @@ async fn run(
                         let mut out = std::io::stdout();
                         out.write_all(kitty::transmit_png(&img.png).as_bytes())?;
                         out.flush()?;
-                        image_height = img.height;
+                        image_size = (img.width, img.height);
                         placed = None;
                         let (_, cell_h) = cell_size();
                         let rows = img.height.div_ceil(cell_h).min(u16::MAX as u32) as u16;
@@ -299,6 +306,8 @@ fn start_preview(
         base_url: r.url.clone(),
         width,
         height: (viewport * 4).clamp(viewport, preview::MAX_HEIGHT.max(viewport)),
+        // 高解像度の画面でも端末の文字と同程度の大きさになるよう、セルの大きさに合わせる
+        scale_percent: preview::auto_scale_percent(cell_h) * app.preview_zoom as u32 / 100,
     };
     app.preview = PreviewState::Rendering;
     app.response_scroll = 0;
@@ -317,7 +326,7 @@ fn start_preview(
 /// 画像の表示位置を描画状態に合わせる。変化がなければ何も送らない。
 fn update_placement(
     app: &App,
-    image_height: u32,
+    (image_width, image_height): (u32, u32),
     cell_w: u32,
     cell_h: u32,
     placed: &mut Option<kitty::Placement>,
@@ -334,7 +343,8 @@ fn update_placement(
                 cols: area.width,
                 rows: src_h.div_ceil(cell_h) as u16,
                 src_y,
-                src_w: area.width as u32 * cell_w,
+                // 倍率の端数で画像の幅がペインと 1px ほどずれることがある
+                src_w: (area.width as u32 * cell_w).min(image_width.max(1)),
                 src_h,
             })
         }

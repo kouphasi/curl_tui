@@ -9,8 +9,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    App, EditorRegion, Focus, Mode, PreviewState, Regions, RequestTab, ResponseState, ResponseTab,
-    SPINNER,
+    App, EditorRegion, Focus, Mode, PREVIEW_ZOOM_DEFAULT, PreviewState, Regions, RequestTab,
+    ResponseState, ResponseTab, SPINNER,
 };
 use crate::curl;
 use crate::editor::TextEditor;
@@ -169,6 +169,16 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("Ctrl+R", "送信"),
         ],
         (_, Focus::Request) => &[("H/L,1-4", "タブ"), ("Ctrl+R", "送信")],
+        (_, Focus::Response)
+            if app.response_tab == ResponseTab::Preview && app.preview_unavailable.is_none() =>
+        {
+            &[
+                ("j/k", "スクロール"),
+                ("+/-/0", "拡大/縮小/リセット"),
+                ("gg/G", "先頭/末尾"),
+                ("H/L", "タブ"),
+            ]
+        }
         (_, Focus::Response) => &[
             ("j/k", "スクロール"),
             ("Ctrl+D/U", "半ページ"),
@@ -444,6 +454,9 @@ fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|t| match t {
                     ResponseTab::Body => Line::from("Body"),
                     ResponseTab::Headers => Line::from(format!("Headers ({})", r.headers.len())),
+                    ResponseTab::Preview if app.preview_zoom != PREVIEW_ZOOM_DEFAULT => {
+                        Line::from(format!("Preview ({}%)", app.preview_zoom))
+                    }
                     ResponseTab::Preview => Line::from("Preview"),
                 })
                 .collect();
@@ -544,6 +557,7 @@ fn draw_help(frame: &mut Frame) {
         ("p / P / u", "貼り付け / 前に貼り付け / 元に戻す"),
         ("Ctrl+D/U/F/B", "レスポンスのページ送り"),
         ("3 (Response)", "HTML のプレビュー (kitty 対応端末)"),
+        ("+ / - / 0", "(Preview) 拡大 / 縮小 / 倍率リセット"),
         (
             "o / dd / yy / p / r",
             "(Collection) 新規 / 削除 / ヤンク / 貼付 / 名前変更",

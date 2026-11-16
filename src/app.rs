@@ -157,6 +157,12 @@ impl ResponseTab {
     }
 }
 
+/// プレビューの表示倍率 (%) の既定値・範囲・`+` / `-` での増減幅。
+pub const PREVIEW_ZOOM_DEFAULT: u16 = 100;
+pub const PREVIEW_ZOOM_MIN: u16 = 25;
+pub const PREVIEW_ZOOM_MAX: u16 = 400;
+pub const PREVIEW_ZOOM_STEP: u16 = 25;
+
 /// HTML プレビューの描画状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewState {
@@ -258,6 +264,8 @@ pub struct App {
     pub preview: PreviewState,
     /// レスポンスごとに増える番号。古いレスポンスの描画結果を捨てるのに使う
     pub preview_generation: u64,
+    /// プレビューの表示倍率 (%)。100 で端末の文字と同程度の大きさ
+    pub preview_zoom: u16,
     /// プレビューが使えない理由 (端末やブラウザが未対応)。main が起動時に設定する
     pub preview_unavailable: Option<String>,
     /// 直近の描画で Preview タブを表示した領域 (ポップアップ表示中などは None)
@@ -306,6 +314,7 @@ impl App {
             response_height: Cell::new(0),
             preview: PreviewState::Idle,
             preview_generation: 0,
+            preview_zoom: PREVIEW_ZOOM_DEFAULT,
             preview_unavailable: None,
             preview_area: Cell::new(None),
             regions: RefCell::new(Regions::default()),
@@ -450,6 +459,17 @@ impl App {
         self.preview_generation += 1;
     }
 
+    /// プレビューの表示倍率を変えて描き直す。
+    pub fn set_preview_zoom(&mut self, percent: i32) {
+        let zoom = percent.clamp(PREVIEW_ZOOM_MIN as i32, PREVIEW_ZOOM_MAX as i32) as u16;
+        self.status = format!("プレビュー倍率 {zoom}%");
+        if zoom != self.preview_zoom {
+            self.preview_zoom = zoom;
+            self.response_scroll = 0;
+            self.reset_preview();
+        }
+    }
+
     pub fn handle_event(&mut self, event: Event) -> Action {
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => self.handle_key(key),
@@ -580,6 +600,9 @@ impl App {
                 .with(Ctx::Editor),
             Mode::Normal => {
                 let mut set = set.with(Ctx::Normal).with(pane);
+                if self.focus == Focus::Response && self.preview_shown() {
+                    set = set.with(Ctx::Preview);
+                }
                 if self.editable() {
                     set = set.with(Ctx::Editor);
                 }
@@ -589,6 +612,11 @@ impl App {
                 set
             }
         }
+    }
+
+    /// Preview タブを表示していて、プレビューが使えるか。
+    fn preview_shown(&self) -> bool {
+        self.response_tab == ResponseTab::Preview && self.preview_unavailable.is_none()
     }
 
     /// フォーカス中のペインが編集できるテキスト欄か。
@@ -824,6 +852,17 @@ impl App {
             C::ResponsePageUp => self.scroll_response_by(-(self.page_size(false) as i32)),
             C::ResponseScrollToTop => self.response_scroll = 0,
             C::ResponseScrollToBottom => self.response_scroll = self.max_scroll(),
+
+            C::PreviewZoomIn | C::PreviewZoomOut | C::PreviewZoomReset => {
+                if self.preview_shown() {
+                    let step = PREVIEW_ZOOM_STEP as i32;
+                    self.set_preview_zoom(match command {
+                        C::PreviewZoomIn => self.preview_zoom as i32 + step,
+                        C::PreviewZoomOut => self.preview_zoom as i32 - step,
+                        _ => PREVIEW_ZOOM_DEFAULT as i32,
+                    });
+                }
+            }
 
             C::VimMoveLeft
             | C::VimMoveRight
@@ -1805,6 +1844,43 @@ mod tests {
         assert_eq!(app.response_scroll, 15);
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(app.response_scroll, 15);
+    }
+
+    #[test]
+    fn preview_zoom_keys_rerender() {
+        let mut app = App::new(vec![]);
+        app.focus = Focus::Response;
+        app.set_response(Ok(html_response()));
+        // Preview タブ以外では効かない
+        app.handle_key(key(KeyCode::Char('+')));
+        assert_eq!(app.preview_zoom, 100);
+
+        app.handle_key(key(KeyCode::Char('3')));
+        app.preview = PreviewState::Ready { cols: 80, rows: 25 };
+        app.response_scroll = 5;
+        let generation = app.preview_generation;
+        app.handle_key(key(KeyCode::Char('+')));
+        assert_eq!(app.preview_zoom, 125);
+        assert_eq!(app.preview, PreviewState::Idle);
+        assert_eq!(app.response_scroll, 0);
+        assert!(app.preview_generation > generation);
+        assert!(app.status.contains("125%"));
+
+        app.handle_key(key(KeyCode::Char('-')));
+        app.handle_key(key(KeyCode::Char('-')));
+        assert_eq!(app.preview_zoom, 75);
+        app.handle_key(key(KeyCode::Char('0')));
+        assert_eq!(app.preview_zoom, 100);
+
+        // 範囲外には出ない
+        for _ in 0..30 {
+            app.handle_key(key(KeyCode::Char('-')));
+        }
+        assert_eq!(app.preview_zoom, PREVIEW_ZOOM_MIN);
+        for _ in 0..30 {
+            app.handle_key(key(KeyCode::Char('=')));
+        }
+        assert_eq!(app.preview_zoom, PREVIEW_ZOOM_MAX);
     }
 
     #[test]

@@ -85,6 +85,10 @@ commands! {
     ResponseScrollToTop => "response::ScrollToTop", "先頭へ";
     ResponseScrollToBottom => "response::ScrollToBottom", "末尾へ";
 
+    PreviewZoomIn => "preview::ZoomIn", "HTML プレビューを拡大";
+    PreviewZoomOut => "preview::ZoomOut", "HTML プレビューを縮小";
+    PreviewZoomReset => "preview::ZoomReset", "HTML プレビューの倍率を 100% に戻す";
+
     VimMoveLeft => "vim::MoveLeft", "(モーション) 左へ";
     VimMoveRight => "vim::MoveRight", "(モーション) 右へ";
     VimMoveUp => "vim::MoveUp", "(モーション) 上へ";
@@ -151,12 +155,13 @@ pub enum Ctx {
     Url,
     Request,
     Response,
+    Preview,
     Editor,
     Operator,
 }
 
 impl Ctx {
-    pub const ALL: [Ctx; 12] = [
+    pub const ALL: [Ctx; 13] = [
         Ctx::Normal,
         Ctx::Insert,
         Ctx::Command,
@@ -167,6 +172,7 @@ impl Ctx {
         Ctx::Url,
         Ctx::Request,
         Ctx::Response,
+        Ctx::Preview,
         Ctx::Editor,
         Ctx::Operator,
     ];
@@ -183,6 +189,7 @@ impl Ctx {
             Ctx::Url => "Url",
             Ctx::Request => "Request",
             Ctx::Response => "Response",
+            Ctx::Preview => "Preview",
             Ctx::Editor => "Editor",
             Ctx::Operator => "Operator",
         }
@@ -200,6 +207,7 @@ impl Ctx {
             Ctx::Url => "URL ペインを選択中 (同上)",
             Ctx::Request => "Request ペインを選択中 (同上)",
             Ctx::Response => "Response ペインを選択中 (同上)",
+            Ctx::Preview => "Response ペインで Preview タブ (HTML プレビュー) を表示中",
             Ctx::Editor => "編集できるテキスト欄 (URL / Params / Headers / Body) を選択中",
             Ctx::Operator => "d / c / y などオペレータの後のモーション待ち",
         }
@@ -631,6 +639,15 @@ pub const DEFAULTS: &[(&str, &[(&str, Command)])] = &[
             ("home", Command::ResponseScrollToTop),
             ("shift-g", Command::ResponseScrollToBottom),
             ("end", Command::ResponseScrollToBottom),
+        ],
+    ),
+    (
+        "Normal && Preview",
+        &[
+            ("+", Command::PreviewZoomIn),
+            ("=", Command::PreviewZoomIn),
+            ("-", Command::PreviewZoomOut),
+            ("0", Command::PreviewZoomReset),
         ],
     ),
     (
