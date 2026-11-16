@@ -15,6 +15,7 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 - HTML レスポンスのプレビュー (Preview タブ。ヘッドレス Chromium で描画し、kitty graphics protocol で端末に表示)
 - リクエストに対応する curl コマンドの表示 (cURL タブ、bash / zsh / sh 向け)
 - コレクション管理 (新規 / 複製 / 削除 / 名前変更) と JSON ファイルへの保存
+- キーバインドのカスタマイズ (JSONC の設定ファイル。`:config` でエディタが開き、保存して閉じると反映)
 - マウス操作 (クリックでペイン / リクエスト / タブ / カーソル位置を選択、ホイールでスクロール)
 - ブラケットペースト対応、日本語などの全角文字の入力に対応
 
@@ -67,6 +68,7 @@ Normal はブロックカーソル、Insert はバーカーソルで表示され
 | `m` / `M` | メソッド切り替え |
 | `H` / `L`, `gT` / `gt`, `1`-`4` | タブ切り替え |
 | `?` | ヘルプ |
+| `:config` | キーバインドの設定ファイルをエディタで開く |
 | `q` / `Ctrl+C` | 終了 |
 
 #### マウス
@@ -117,6 +119,55 @@ Collection から `Ctrl+L` で戻ると、直前にいた右側のペインに�
 
 入力途中のキー (`d`, `g`, `^W` など) はヘッダ行の右端に表示されます。`Esc` で取り消せます。
 
+## キーバインドの設定
+
+キーバインドは `~/.config/curl_tui/config.jsonc` (`XDG_CONFIG_HOME` があればその下) で変更できます。
+何も書かなければ上の表の既定のキーのままです。
+
+1. TUI で `:config` を実行する (`app::OpenConfig` をキーに割り当てることもできます)
+2. `$VISUAL` / `$EDITOR` (未設定なら `vi`) で設定ファイルが開く。初回は雛形が作られます
+3. 編集して保存し、エディタを終了すると、その場で反映される
+
+GUI のエディタを使う場合は、`EDITOR="code --wait"` のように閉じるまで待つオプションを付けてください。
+設定にエラーがあるとステータス行に表示され、それまでのキーバインドがそのまま使われます。
+
+書式は [Zed のキーマップ](https://zed.dev/docs/key-bindings) にならっています。
+「どの環境 (コンテキスト) で」「どのキーを押すと」「どのコマンドが動くか」を並べます。
+
+```jsonc
+{
+  "keymap": [
+    {
+      "context": "Normal",
+      "bindings": {
+        "ctrl-g": "app::Send",   // Ctrl+G でも送信
+        "space w": "app::Save",  // Space → w で保存
+        "q": null                // q では終了しない
+      }
+    },
+    {
+      "context": "Insert",
+      "bindings": { "j k": "vim::NormalMode" }  // jk で Normal モードへ
+    }
+  ]
+}
+```
+
+- 設定は既定のキーバインドに追加・上書きされます。同じキーが複数当てはまるときは後に書いたものが優先です
+- `null` を指定すると、そのキーの割り当てを無効にできます
+- `"context"` は `Normal` / `Insert` / `Collection` / `Url` / `Request` / `Response` / `Editor` などの名前を
+  `&&` `||` `!` `( )` で組み合わせて書きます (例: `"Normal && Collection"`)。省略するとどこでも有効です
+- キーは `ctrl-r` / `shift-g` / `escape` / `f5` のように書き、続けて押すキーは `"g g"` のように空白で区切ります
+
+コンテキスト・コマンド名とその動作・既定のキーバインドの一覧は、設定ファイルの後半にコメントで入っています
+(`:config` で開くたびに最新の内容に更新されます)。既定のキーバインドは設定と同じ書式なので、
+必要な行をコピーして `"keymap"` に貼り付ければそのまま使えます。
+
+| 環境変数 | 意味 |
+| --- | --- |
+| `CURL_TUI_CONFIG` | 設定ファイルの場所を変える |
+| `VISUAL` / `EDITOR` | `:config` で使うエディタ |
+
 ## HTML プレビュー (Preview タブ)
 
 レスポンスの `Content-Type` が `text/html` (または `application/xhtml+xml`) のときだけ、
@@ -152,6 +203,8 @@ fish・PowerShell・コマンドプロンプトはクォートの規則が違う
 src/
 ├── main.rs        # Tokio のイベントループ (キー入力 / HTTP 結果 / tick を select!)
 ├── app.rs         # アプリ状態と Vim 風キー処理 (I/O を持たない状態機械)
+├── keymap.rs      # コマンド名 / コンテキスト / 既定のキーバインド
+├── config.rs      # 設定ファイル (JSONC) の読み込みと雛形の生成
 ├── ui.rs          # Ratatui による描画
 ├── editor.rs      # 単一行 / 複数行テキストエディタ (単語移動・範囲削除・undo)
 ├── curl.rs        # curl コマンド生成 (bash / zsh / sh 向け)
