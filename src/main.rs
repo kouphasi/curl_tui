@@ -21,9 +21,7 @@ use tokio::sync::mpsc;
 
 use curl_tui::{
     app::{Action, App, Mode, PreviewState, ResponseState},
-    clipboard, collection, config, http, i18n,
-    keymap::Keymap,
-    kitty,
+    clipboard, collection, config, http, i18n, kitty,
     model::Response,
     preview, t, tf,
 };
@@ -73,7 +71,10 @@ async fn main() -> Result<()> {
         app.status.clear();
     }
     match loaded {
-        Ok(keymap) => app.set_keymap(keymap),
+        Ok(config) => {
+            app.set_keymap(config.keymap);
+            app.set_vimrc(config.vimrc);
+        }
         // 設定が壊れていても既定のキーで起動する
         Err(e) => {
             app.status = tf!(
@@ -105,15 +106,15 @@ async fn main() -> Result<()> {
     result
 }
 
-/// 設定ファイルを読み、表示言語を切り替えてキーマップを返す。キーマップなどに
+/// 設定ファイルを読み、表示言語を切り替えて設定を返す。キーマップなどに
 /// エラーがあっても `"lang"` が読めれば言語だけは反映する (エラーもその言語で出す)。
-fn load_config(path: &Path) -> Result<Keymap> {
+fn load_config(path: &Path) -> Result<config::Config> {
     if let Some(lang) = config::peek_lang(path) {
         i18n::set(lang);
     }
     let config = config::load(path)?;
     i18n::set(config.lang);
-    Ok(config.keymap)
+    Ok(config)
 }
 
 /// HTML プレビューを表示できない理由 (表示できるなら `None`)。
@@ -193,9 +194,10 @@ fn edit_config(
             "エディタ `{program}` を起動できません ($EDITOR を確認してください): {e}"
         ),
         Ok(_) => match load_config(config_path) {
-            Ok(keymap) => {
-                let count = keymap.user_count();
-                app.set_keymap(keymap);
+            Ok(config) => {
+                let count = config.user_count();
+                app.set_keymap(config.keymap);
+                app.set_vimrc(config.vimrc);
                 tf!(
                     "Config applied ({count} key bindings): {p}",
                     "設定を反映しました (キーバインド {count} 件): {p}",
@@ -233,7 +235,7 @@ async fn run(
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
 
     let mut cursor_mode = None;
-    loop {
+    'main: loop {
         // Vim と同じく Normal はブロック、Insert 系はバーのカーソルにする
         let insert_like = matches!(app.mode, Mode::Editing | Mode::Rename | Mode::Command);
         if cursor_mode != Some(insert_like) {
@@ -253,7 +255,9 @@ async fn run(
         }
 
         let mut open_config = false;
-        tokio::select! {
+        // "vimrc" のマッピングの続きのキーを待っているなら、その期限
+        let deadline = app.key_deadline();
+        let mut action = tokio::select! {
             maybe = events.next() => {
                 let Some(event) = maybe else { break };
                 let event = event?;
@@ -261,38 +265,13 @@ async fn run(
                     // 画面がクリアされると画像も消えるので置き直す
                     placed = None;
                 }
-                match app.handle_event(event) {
-                    Action::None => {}
-                    Action::Quit => break,
-                    Action::Send(req) => {
-                        let client = client.clone();
-                        let tx = tx.clone();
-                        // 送信は別タスクで行い UI をブロックしない
-                        tokio::spawn(async move {
-                            let res = http::send(&client, &req).await.map_err(|e| format!("{e:#}"));
-                            let _ = tx.send(res);
-                        });
-                    }
-                    Action::Save(reqs) => {
-                        app.status = match collection::save(path, &reqs) {
-                            Ok(()) => tf!("Saved: {p}", "保存しました: {p}", p = path.display()),
-                            Err(e) => tf!("Failed to save: {e:#}", "保存に失敗: {e:#}"),
-                        };
-                    }
-                    Action::SaveAndQuit(reqs) => match collection::save(path, &reqs) {
-                        Ok(()) => break,
-                        // 保存できなければ終了しない
-                        Err(e) => app.status = tf!("Failed to save: {e:#}", "保存に失敗: {e:#}"),
-                    },
-                    Action::EditConfig => open_config = true,
-                    Action::Copy(text) => {
-                        if let Err(e) = clipboard::copy(&text, &mut std::io::stdout()) {
-                            app.status = tf!("Failed to copy: {e}", "コピーに失敗: {e}");
-                        }
-                    }
-                }
+                app.handle_event(event)
             }
-            Some(res) = rx.recv() => app.set_response(res),
+            _ = sleep_until(deadline), if deadline.is_some() => app.key_timeout(),
+            Some(res) = rx.recv() => {
+                app.set_response(res);
+                Action::None
+            }
             Some((generation, cols, res)) = prx.recv() => {
                 if generation != app.preview_generation {
                     continue; // 別のレスポンスの描画結果
@@ -310,8 +289,52 @@ async fn run(
                     }
                     Err(e) => app.preview = PreviewState::Failed(e),
                 }
+                Action::None
             }
-            _ = ticker.tick(), if app.is_busy() => app.tick(),
+            _ = ticker.tick(), if app.is_busy() => {
+                app.tick();
+                Action::None
+            }
+        };
+        // マッピングで 1 度に複数のキーが入ると、Action が複数出ることがある
+        loop {
+            match action {
+                Action::None => {}
+                Action::Quit => break 'main,
+                Action::Send(req) => {
+                    let client = client.clone();
+                    let tx = tx.clone();
+                    // 送信は別タスクで行い UI をブロックしない
+                    tokio::spawn(async move {
+                        let res = http::send(&client, &req)
+                            .await
+                            .map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(res);
+                    });
+                }
+                Action::Save(reqs) => {
+                    app.status = match collection::save(path, &reqs) {
+                        Ok(()) => tf!("Saved: {p}", "保存しました: {p}", p = path.display()),
+                        Err(e) => tf!("Failed to save: {e:#}", "保存に失敗: {e:#}"),
+                    };
+                }
+                Action::SaveAndQuit(reqs) => match collection::save(path, &reqs) {
+                    Ok(()) => break 'main,
+                    // 保存できなければ終了しない
+                    Err(e) => app.status = tf!("Failed to save: {e:#}", "保存に失敗: {e:#}"),
+                },
+                Action::EditConfig => open_config = true,
+                Action::Copy(text) => {
+                    if let Err(e) = clipboard::copy(&text, &mut std::io::stdout()) {
+                        app.status = tf!("Failed to copy: {e}", "コピーに失敗: {e}");
+                    }
+                }
+            }
+            // エディタを開くときは残りのキーを捨てる (設定を読み直すため)
+            if open_config || !app.has_queued_keys() {
+                break;
+            }
+            action = app.resume_keys();
         }
         if open_config {
             // 入力の読み取りを止めてからエディタに端末を渡す (止めないとキー入力を奪い合う)
@@ -328,6 +351,13 @@ async fn run(
         }
     }
     Ok(())
+}
+
+/// `deadline` まで待つ (None なら呼ばれない。select! の条件で除外する)。
+async fn sleep_until(deadline: Option<std::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline.into()).await;
+    }
 }
 
 /// 1 セルのピクセルサイズ。端末が教えてくれない場合は一般的な値を仮定する。

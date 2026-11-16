@@ -17,6 +17,7 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 - Visual モードでの文字選択とクリップボードへのコピー (`v` / `V` → `y`。cURL タブやレスポンスの Body / Headers でも可)
 - コレクション管理 (新規 / 複製 / 削除 / 名前変更) と JSON ファイルへの保存
 - キーバインドのカスタマイズ (JSONC の設定ファイル。`:config` でエディタが開き、保存して閉じると反映)
+- Vim 形式のキーマッピング (設定ファイルの `"vimrc"` に `imap jj <Esc>` のように書ける)
 - 表示言語は英語 (既定) / 日本語 (設定ファイルに `"lang": "ja"`)
 - マウス操作 (クリックでペイン / リクエスト / タブ / カーソル位置を選択、ホイールでスクロール)
 - ブラケットペースト対応、日本語などの全角文字の入力に対応
@@ -210,6 +211,48 @@ GUI のエディタを使う場合は、`EDITOR="code --wait"` のように閉�
 | `CURL_TUI_CONFIG` | 設定ファイルの場所を変える |
 | `VISUAL` / `EDITOR` | `:config` で使うエディタ |
 
+### Vim 形式のマッピング (`"vimrc"`)
+
+同じ設定ファイルの `"vimrc"` に、`.vimrc` と同じ書き方でキーマッピングを書けます (1 要素が 1 行)。
+`"keymap"` が「キー → コマンド」なのに対し、こちらは Vim と同じ「キー → キー列」の置き換えです。
+
+```jsonc
+{
+  "vimrc": [
+    "\" コメント",
+    "imap jj <Esc>",                 // Insert モードで jj → Normal モードへ
+    "let mapleader = ' '",           // <Leader> を Space に (マッピングより前に書く)
+    "nnoremap <Leader>w :w<CR>",     // Space → w で保存
+    "nnoremap <Leader>s <C-r>",      // Space → s で送信
+    "nnoremap q <Nop>",              // q では何もしない
+    "vnoremap Y y",                  // Visual モードの Y でもコピー
+    "set timeoutlen=500"             // 続きのキーを待つ時間 (ミリ秒、既定 1000)
+  ]
+}
+```
+
+改行を含む 1 つの文字列 (`"vimrc": "imap jj <Esc>\nnnoremap ..."`) でも書けます。
+
+| コマンド | 有効なモード |
+| --- | --- |
+| `imap` / `inoremap` | Insert |
+| `nmap` / `nnoremap` | Normal |
+| `vmap` / `xmap` / `vnoremap` / `xnoremap` | Visual |
+| `omap` / `onoremap` | オペレータ (`d` / `c` / `y`) の後 |
+| `cmap` / `cnoremap` | `:` コマンドライン・リクエスト名の入力欄 |
+| `map` / `noremap` | Normal + Visual + オペレータの後 |
+| `map!` / `noremap!` | Insert + コマンドライン |
+| `unmap` / `nunmap` / `iunmap` / … | 前に書いたマッピングを取り消す |
+
+- 右辺は「代わりに押すキー」なので、`:w<CR>` のような `:` コマンドも含め、手で打てるものは何でも書けます
+- `map` 系は展開後のキーにもマッピングを適用し、`noremap` 系は適用しません (Vim と同じ)
+- 続きのキーが `timeoutlen` の間に来なければ、押したキーはそのまま (または短いマッピングとして) 処理されます。
+  `jj` のマッピングがあっても `j` を 1 回だけ打てば、少し待つと `j` が入力されます。`set notimeout` で待ち続けます
+- キーの表記: `<Esc>` `<CR>` `<Tab>` `<S-Tab>` `<BS>` `<Del>` `<Space>` `<Up>` `<F5>` `<C-x>` `<M-x>` (`<A-x>`)
+  `<lt>` `<Bar>` `<Bslash>` `<Leader>` `<LocalLeader>`。`<silent>` などの引数は書けますが無視します (`<nowait>` は有効)
+- `"keymap"` で割り当てたキーにも使えます (マッピングを展開した後のキーが `"keymap"` で解釈されます)
+- 対応していないコマンド (`set number` / `autocmd` など) はエラーになります
+
 ## HTML プレビュー (Preview タブ)
 
 レスポンスの `Content-Type` が `text/html` (または `application/xhtml+xml`) のときだけ、
@@ -253,6 +296,7 @@ src/
 ├── app.rs         # アプリ状態と Vim 風キー処理 (I/O を持たない状態機械)
 ├── keymap.rs      # コマンド名 / コンテキスト / 既定のキーバインド
 ├── config.rs      # 設定ファイル (JSONC) の読み込みと雛形の生成
+├── vimrc.rs       # 設定ファイルの "vimrc" (Vim 形式のキーマッピング) の解釈
 ├── i18n.rs        # 表示言語 (英語 / 日本語) の切り替え
 ├── ui.rs          # Ratatui による描画
 ├── editor.rs      # 単一行 / 複数行テキストエディタ (単語移動・範囲削除・undo)
