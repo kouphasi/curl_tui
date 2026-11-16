@@ -12,7 +12,10 @@ pub fn build_client(timeout: Duration) -> anyhow::Result<reqwest::Client> {
         .timeout(timeout)
         .user_agent(concat!("curl_tui/", env!("CARGO_PKG_VERSION")))
         .build()
-        .context("HTTP クライアントの作成に失敗しました")
+        .context(crate::t!(
+            "failed to create the HTTP client",
+            "HTTP クライアントの作成に失敗しました"
+        ))
 }
 
 /// リクエストを送信し、レスポンスを返す。
@@ -67,13 +70,13 @@ pub async fn send(client: &reqwest::Client, req: &Request) -> anyhow::Result<Res
 
 fn describe_error(e: reqwest::Error) -> anyhow::Error {
     let kind = if e.is_timeout() {
-        "タイムアウト"
+        crate::t!("Timeout", "タイムアウト")
     } else if e.is_connect() {
-        "接続エラー"
+        crate::t!("Connection error", "接続エラー")
     } else if e.is_builder() {
-        "リクエスト構築エラー"
+        crate::t!("Request build error", "リクエスト構築エラー")
     } else {
-        "通信エラー"
+        crate::t!("Network error", "通信エラー")
     };
     // reqwest のエラーは source チェーンに詳細があるので連結する
     let mut msg = e.to_string();

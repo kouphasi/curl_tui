@@ -21,20 +21,42 @@ use tokio::sync::mpsc;
 
 use curl_tui::{
     app::{Action, App, Mode, PreviewState, ResponseState},
-    clipboard, collection, config, http, kitty,
+    clipboard, collection, config, http, i18n,
+    keymap::Keymap,
+    kitty,
     model::Response,
-    preview,
+    preview, t, tf,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 表示言語は設定ファイルで決まるので、何かを表示する前に読む
+    let config_path = config::default_path();
+    let loaded = load_config(&config_path);
     let path = match std::env::args().nth(1).as_deref() {
         Some("-h" | "--help") => {
-            println!("使い方: curl_tui [コレクションファイル.json]");
-            println!("既定: {}", collection::default_path().display());
             println!(
-                "設定ファイル: {} (:config で編集)",
-                config::default_path().display()
+                "{}",
+                t!(
+                    "Usage: curl_tui [collection-file.json]",
+                    "使い方: curl_tui [コレクションファイル.json]"
+                )
+            );
+            println!(
+                "{}",
+                tf!(
+                    "Default: {p}",
+                    "既定: {p}",
+                    p = collection::default_path().display()
+                )
+            );
+            println!(
+                "{}",
+                tf!(
+                    "Config file: {p} (edit with :config)",
+                    "設定ファイル: {p} (:config で編集)",
+                    p = config_path.display()
+                )
             );
             return Ok(());
         }
@@ -50,21 +72,18 @@ async fn main() -> Result<()> {
         app.set_preview_zoom(zoom);
         app.status.clear();
     }
-    let config_path = config::default_path();
-    match config::load(&config_path) {
+    match loaded {
         Ok(keymap) => app.set_keymap(keymap),
         // 設定が壊れていても既定のキーで起動する
-        Err(e) => app.status = format!("設定エラー (既定のキーで起動): {e:#}"),
+        Err(e) => {
+            app.status = tf!(
+                "Config error (starting with the default keys): {e:#}",
+                "設定エラー (既定のキーで起動): {e:#}"
+            )
+        }
     }
     let browser = preview::find_browser();
-    app.preview_unavailable = match (kitty::detect(), &browser) {
-        (Err(e), _) => Some(e),
-        (Ok(()), None) => Some(
-            "Chromium 系のブラウザが見つかりません (CURL_TUI_BROWSER で実行ファイルを指定できます)"
-                .into(),
-        ),
-        (Ok(()), Some(_)) => None,
-    };
+    app.preview_unavailable = preview_unavailable(browser.as_deref());
 
     // ratatui::init は raw mode / 代替画面 / パニック時の復元フックを設定する
     let mut terminal = ratatui::init();
@@ -84,6 +103,32 @@ async fn main() -> Result<()> {
     disable_extras(enhanced());
     ratatui::restore();
     result
+}
+
+/// 設定ファイルを読み、表示言語を切り替えてキーマップを返す。キーマップなどに
+/// エラーがあっても `"lang"` が読めれば言語だけは反映する (エラーもその言語で出す)。
+fn load_config(path: &Path) -> Result<Keymap> {
+    if let Some(lang) = config::peek_lang(path) {
+        i18n::set(lang);
+    }
+    let config = config::load(path)?;
+    i18n::set(config.lang);
+    Ok(config.keymap)
+}
+
+/// HTML プレビューを表示できない理由 (表示できるなら `None`)。
+fn preview_unavailable(browser: Option<&Path>) -> Option<String> {
+    match (kitty::detect(), browser) {
+        (Err(e), _) => Some(e),
+        (Ok(()), None) => Some(
+            t!(
+                "no Chromium-based browser was found (set CURL_TUI_BROWSER to the executable)",
+                "Chromium 系のブラウザが見つかりません (CURL_TUI_BROWSER で実行ファイルを指定できます)"
+            )
+            .into(),
+        ),
+        (Ok(()), Some(_)) => None,
+    }
 }
 
 /// 通常の端末では Shift+Esc が素の Esc と区別できない。kitty keyboard protocol に
@@ -118,9 +163,17 @@ fn disable_extras(enhanced: bool) {
 }
 
 /// TUI を一時的に抜けて設定ファイルをエディタで開き、閉じたら読み直す。
-fn edit_config(terminal: &mut DefaultTerminal, app: &mut App, config_path: &Path) -> Result<()> {
+fn edit_config(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    config_path: &Path,
+    browser: Option<&Path>,
+) -> Result<()> {
     if let Err(e) = config::prepare(config_path) {
-        app.status = format!("設定ファイルを用意できません: {e:#}");
+        app.status = tf!(
+            "Cannot prepare the config file: {e:#}",
+            "設定ファイルを用意できません: {e:#}"
+        );
         return Ok(());
     }
     disable_extras(enhanced());
@@ -135,21 +188,28 @@ fn edit_config(terminal: &mut DefaultTerminal, app: &mut App, config_path: &Path
     enable_extras(enhanced())?;
 
     app.status = match edited {
-        Err(e) => {
-            format!("エディタ `{program}` を起動できません ($EDITOR を確認してください): {e}")
-        }
-        Ok(_) => match config::load(config_path) {
+        Err(e) => tf!(
+            "Cannot launch the editor `{program}` (check $EDITOR): {e}",
+            "エディタ `{program}` を起動できません ($EDITOR を確認してください): {e}"
+        ),
+        Ok(_) => match load_config(config_path) {
             Ok(keymap) => {
                 let count = keymap.user_count();
                 app.set_keymap(keymap);
-                format!(
-                    "設定を反映しました (キーバインド {count} 件): {}",
-                    config_path.display()
+                tf!(
+                    "Config applied ({count} key bindings): {p}",
+                    "設定を反映しました (キーバインド {count} 件): {p}",
+                    p = config_path.display()
                 )
             }
-            Err(e) => format!("設定エラー (未反映): {e:#}"),
+            Err(e) => tf!(
+                "Config error (not applied): {e:#}",
+                "設定エラー (未反映): {e:#}"
+            ),
         },
     };
+    // 言語が変わったかもしれないので、表示済みの文言を作り直す
+    app.preview_unavailable = preview_unavailable(browser);
     Ok(())
 }
 
@@ -215,19 +275,19 @@ async fn run(
                     }
                     Action::Save(reqs) => {
                         app.status = match collection::save(path, &reqs) {
-                            Ok(()) => format!("保存しました: {}", path.display()),
-                            Err(e) => format!("保存に失敗: {e:#}"),
+                            Ok(()) => tf!("Saved: {p}", "保存しました: {p}", p = path.display()),
+                            Err(e) => tf!("Failed to save: {e:#}", "保存に失敗: {e:#}"),
                         };
                     }
                     Action::SaveAndQuit(reqs) => match collection::save(path, &reqs) {
                         Ok(()) => break,
                         // 保存できなければ終了しない
-                        Err(e) => app.status = format!("保存に失敗: {e:#}"),
+                        Err(e) => app.status = tf!("Failed to save: {e:#}", "保存に失敗: {e:#}"),
                     },
                     Action::EditConfig => open_config = true,
                     Action::Copy(text) => {
                         if let Err(e) = clipboard::copy(&text, &mut std::io::stdout()) {
-                            app.status = format!("コピーに失敗: {e}");
+                            app.status = tf!("Failed to copy: {e}", "コピーに失敗: {e}");
                         }
                     }
                 }
@@ -261,7 +321,7 @@ async fn run(
                 out.write_all(kitty::hide().as_bytes())?;
                 out.flush()?;
             }
-            let edited = edit_config(terminal, app, config_path);
+            let edited = edit_config(terminal, app, config_path, browser.as_deref());
             events = EventStream::new();
             cursor_mode = None;
             edited?;

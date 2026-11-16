@@ -8,8 +8,10 @@ use std::fmt;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::{t, tf};
+
 macro_rules! commands {
-    ($($variant:ident => $name:literal, $desc:literal;)*) => {
+    ($($variant:ident => $name:literal, $en:literal, $ja:literal;)*) => {
         /// キーに割り当てられる操作。
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum Command { $($variant,)* }
@@ -22,8 +24,9 @@ macro_rules! commands {
                 match self { $(Command::$variant => $name,)* }
             }
 
+            /// 現在の表示言語での説明。
             pub fn description(self) -> &'static str {
-                match self { $(Command::$variant => $desc,)* }
+                match self { $(Command::$variant => $crate::t!($en, $ja),)* }
             }
 
             pub fn from_name(name: &str) -> Option<Self> {
@@ -34,115 +37,115 @@ macro_rules! commands {
 }
 
 commands! {
-    AppQuit => "app::Quit", "終了";
-    AppSend => "app::Send", "リクエストを送信";
-    AppSave => "app::Save", "コレクションを保存";
-    AppSaveAndQuit => "app::SaveAndQuit", "保存して終了";
-    AppShowHelp => "app::ShowHelp", "ヘルプを表示";
-    AppOpenCommandLine => "app::OpenCommandLine", ": コマンドラインを開く";
-    AppOpenConfig => "app::OpenConfig", "この設定ファイルをエディタで開く (:config と同じ)";
+    AppQuit => "app::Quit", "Quit", "終了";
+    AppSend => "app::Send", "Send the request", "リクエストを送信";
+    AppSave => "app::Save", "Save the collection", "コレクションを保存";
+    AppSaveAndQuit => "app::SaveAndQuit", "Save and quit", "保存して終了";
+    AppShowHelp => "app::ShowHelp", "Show help", "ヘルプを表示";
+    AppOpenCommandLine => "app::OpenCommandLine", "Open the : command line", ": コマンドラインを開く";
+    AppOpenConfig => "app::OpenConfig", "Open this config file in your editor (same as :config)", "この設定ファイルをエディタで開く (:config と同じ)";
 
-    PaneFocusLeft => "pane::FocusLeft", "左のペイン (Collection) へ";
-    PaneFocusDown => "pane::FocusDown", "下のペインへ";
-    PaneFocusUp => "pane::FocusUp", "上のペインへ";
-    PaneFocusRight => "pane::FocusRight", "右のペイン (直前にいた URL / Request / Response) へ";
-    PaneFocusNext => "pane::FocusNext", "次のペインへ";
-    PaneFocusPrev => "pane::FocusPrev", "前のペインへ";
-    PaneFocusCollection => "pane::FocusCollection", "Collection ペインへ";
-    PaneFocusUrl => "pane::FocusUrl", "URL ペインへ";
-    PaneFocusRequest => "pane::FocusRequest", "Request ペインへ";
-    PaneFocusResponse => "pane::FocusResponse", "Response ペインへ";
-    PaneToggleZoom => "pane::ToggleZoom", "選択中のペインを全画面表示 / 元に戻す";
+    PaneFocusLeft => "pane::FocusLeft", "Focus the pane to the left (Collection)", "左のペイン (Collection) へ";
+    PaneFocusDown => "pane::FocusDown", "Focus the pane below", "下のペインへ";
+    PaneFocusUp => "pane::FocusUp", "Focus the pane above", "上のペインへ";
+    PaneFocusRight => "pane::FocusRight", "Focus the pane to the right (the last used of URL / Request / Response)", "右のペイン (直前にいた URL / Request / Response) へ";
+    PaneFocusNext => "pane::FocusNext", "Focus the next pane", "次のペインへ";
+    PaneFocusPrev => "pane::FocusPrev", "Focus the previous pane", "前のペインへ";
+    PaneFocusCollection => "pane::FocusCollection", "Focus the Collection pane", "Collection ペインへ";
+    PaneFocusUrl => "pane::FocusUrl", "Focus the URL pane", "URL ペインへ";
+    PaneFocusRequest => "pane::FocusRequest", "Focus the Request pane", "Request ペインへ";
+    PaneFocusResponse => "pane::FocusResponse", "Focus the Response pane", "Response ペインへ";
+    PaneToggleZoom => "pane::ToggleZoom", "Zoom the focused pane to full screen / restore", "選択中のペインを全画面表示 / 元に戻す";
 
-    RequestNextMethod => "request::NextMethod", "HTTP メソッドを次へ";
-    RequestPrevMethod => "request::PrevMethod", "HTTP メソッドを前へ";
+    RequestNextMethod => "request::NextMethod", "Next HTTP method", "HTTP メソッドを次へ";
+    RequestPrevMethod => "request::PrevMethod", "Previous HTTP method", "HTTP メソッドを前へ";
 
-    TabNext => "tab::Next", "次のタブ";
-    TabPrev => "tab::Prev", "前のタブ";
-    TabSelect1 => "tab::Select1", "1 番目のタブ";
-    TabSelect2 => "tab::Select2", "2 番目のタブ";
-    TabSelect3 => "tab::Select3", "3 番目のタブ";
-    TabSelect4 => "tab::Select4", "4 番目のタブ";
+    TabNext => "tab::Next", "Next tab", "次のタブ";
+    TabPrev => "tab::Prev", "Previous tab", "前のタブ";
+    TabSelect1 => "tab::Select1", "1st tab", "1 番目のタブ";
+    TabSelect2 => "tab::Select2", "2nd tab", "2 番目のタブ";
+    TabSelect3 => "tab::Select3", "3rd tab", "3 番目のタブ";
+    TabSelect4 => "tab::Select4", "4th tab", "4 番目のタブ";
 
-    CollectionSelectNext => "collection::SelectNext", "下のリクエストを選択";
-    CollectionSelectPrev => "collection::SelectPrev", "上のリクエストを選択";
-    CollectionSelectFirst => "collection::SelectFirst", "先頭のリクエストを選択";
-    CollectionSelectLast => "collection::SelectLast", "末尾のリクエストを選択";
-    CollectionNewBelow => "collection::NewBelow", "下に新しいリクエストを作成";
-    CollectionNewAbove => "collection::NewAbove", "上に新しいリクエストを作成";
-    CollectionYank => "collection::Yank", "リクエストをヤンク (コピー)";
-    CollectionDelete => "collection::Delete", "リクエストを削除 (ヤンクもする)";
-    CollectionPasteAfter => "collection::PasteAfter", "ヤンクしたリクエストを下に貼り付け";
-    CollectionPasteBefore => "collection::PasteBefore", "ヤンクしたリクエストを上に貼り付け";
-    CollectionRename => "collection::Rename", "リクエストの名前を変更";
+    CollectionSelectNext => "collection::SelectNext", "Select the request below", "下のリクエストを選択";
+    CollectionSelectPrev => "collection::SelectPrev", "Select the request above", "上のリクエストを選択";
+    CollectionSelectFirst => "collection::SelectFirst", "Select the first request", "先頭のリクエストを選択";
+    CollectionSelectLast => "collection::SelectLast", "Select the last request", "末尾のリクエストを選択";
+    CollectionNewBelow => "collection::NewBelow", "Create a new request below", "下に新しいリクエストを作成";
+    CollectionNewAbove => "collection::NewAbove", "Create a new request above", "上に新しいリクエストを作成";
+    CollectionYank => "collection::Yank", "Yank (copy) the request", "リクエストをヤンク (コピー)";
+    CollectionDelete => "collection::Delete", "Delete the request (also yanks it)", "リクエストを削除 (ヤンクもする)";
+    CollectionPasteAfter => "collection::PasteAfter", "Paste the yanked request below", "ヤンクしたリクエストを下に貼り付け";
+    CollectionPasteBefore => "collection::PasteBefore", "Paste the yanked request above", "ヤンクしたリクエストを上に貼り付け";
+    CollectionRename => "collection::Rename", "Rename the request", "リクエストの名前を変更";
 
-    ResponseScrollDown => "response::ScrollDown", "1 行下へスクロール";
-    ResponseScrollUp => "response::ScrollUp", "1 行上へスクロール";
-    ResponseHalfPageDown => "response::HalfPageDown", "半ページ下へ";
-    ResponseHalfPageUp => "response::HalfPageUp", "半ページ上へ";
-    ResponsePageDown => "response::PageDown", "1 ページ下へ";
-    ResponsePageUp => "response::PageUp", "1 ページ上へ";
-    ResponseScrollToTop => "response::ScrollToTop", "先頭へ";
-    ResponseScrollToBottom => "response::ScrollToBottom", "末尾へ";
+    ResponseScrollDown => "response::ScrollDown", "Scroll down one line", "1 行下へスクロール";
+    ResponseScrollUp => "response::ScrollUp", "Scroll up one line", "1 行上へスクロール";
+    ResponseHalfPageDown => "response::HalfPageDown", "Half a page down", "半ページ下へ";
+    ResponseHalfPageUp => "response::HalfPageUp", "Half a page up", "半ページ上へ";
+    ResponsePageDown => "response::PageDown", "One page down", "1 ページ下へ";
+    ResponsePageUp => "response::PageUp", "One page up", "1 ページ上へ";
+    ResponseScrollToTop => "response::ScrollToTop", "Go to the top", "先頭へ";
+    ResponseScrollToBottom => "response::ScrollToBottom", "Go to the bottom", "末尾へ";
 
-    PreviewZoomIn => "preview::ZoomIn", "HTML プレビューを拡大";
-    PreviewZoomOut => "preview::ZoomOut", "HTML プレビューを縮小";
-    PreviewZoomReset => "preview::ZoomReset", "HTML プレビューの倍率を 100% に戻す";
+    PreviewZoomIn => "preview::ZoomIn", "Zoom in the HTML preview", "HTML プレビューを拡大";
+    PreviewZoomOut => "preview::ZoomOut", "Zoom out the HTML preview", "HTML プレビューを縮小";
+    PreviewZoomReset => "preview::ZoomReset", "Reset the HTML preview zoom to 100%", "HTML プレビューの倍率を 100% に戻す";
 
-    VimMoveLeft => "vim::MoveLeft", "(モーション) 左へ";
-    VimMoveRight => "vim::MoveRight", "(モーション) 右へ";
-    VimMoveUp => "vim::MoveUp", "(モーション) 上へ";
-    VimMoveDown => "vim::MoveDown", "(モーション) 下へ";
-    VimMoveWordForward => "vim::MoveWordForward", "(モーション) 次の単語の先頭へ";
-    VimMoveWordBackward => "vim::MoveWordBackward", "(モーション) 前の単語の先頭へ";
-    VimMoveWordEnd => "vim::MoveWordEnd", "(モーション) 単語の末尾へ";
-    VimMoveToLineStart => "vim::MoveToLineStart", "(モーション) 行頭へ";
-    VimMoveToFirstNonBlank => "vim::MoveToFirstNonBlank", "(モーション) 行頭の空白でない文字へ";
-    VimMoveToLineEnd => "vim::MoveToLineEnd", "(モーション) 行末へ";
-    VimMoveToTop => "vim::MoveToTop", "(モーション) 先頭行へ";
-    VimMoveToBottom => "vim::MoveToBottom", "(モーション) 最終行へ";
-    VimInsert => "vim::Insert", "カーソル位置で Insert モードへ";
-    VimAppend => "vim::Append", "カーソルの後ろで Insert モードへ";
-    VimInsertAtLineStart => "vim::InsertAtLineStart", "行頭で Insert モードへ";
-    VimAppendAtLineEnd => "vim::AppendAtLineEnd", "行末で Insert モードへ";
-    VimOpenLineBelow => "vim::OpenLineBelow", "下に行を追加して Insert モードへ";
-    VimOpenLineAbove => "vim::OpenLineAbove", "上に行を追加して Insert モードへ";
-    VimDeleteChar => "vim::DeleteChar", "カーソル位置の 1 文字を削除";
-    VimDeleteCharBefore => "vim::DeleteCharBefore", "カーソルの前の 1 文字を削除";
-    VimDeleteToLineEnd => "vim::DeleteToLineEnd", "行末まで削除";
-    VimChangeToLineEnd => "vim::ChangeToLineEnd", "行末まで削除して Insert モードへ";
-    VimSubstituteChar => "vim::SubstituteChar", "1 文字削除して Insert モードへ";
-    VimSubstituteLine => "vim::SubstituteLine", "行を消して Insert モードへ";
-    VimYankLine => "vim::YankLine", "行をヤンク";
-    VimPasteAfter => "vim::PasteAfter", "ヤンクした内容を後ろに貼り付け";
-    VimPasteBefore => "vim::PasteBefore", "ヤンクした内容を前に貼り付け";
-    VimUndo => "vim::Undo", "元に戻す";
-    VimReplaceChar => "vim::ReplaceChar", "次に押した文字で 1 文字置換";
-    VimDelete => "vim::Delete", "(オペレータ) 削除。続けてモーション、同じキーで行ごと";
-    VimChange => "vim::Change", "(オペレータ) 削除して Insert モードへ";
-    VimYank => "vim::Yank", "(オペレータ) ヤンクしてクリップボードにコピー。Visual モードでは選択範囲が対象";
-    VimVisual => "vim::Visual", "Visual モード (文字単位の選択) を開始 / 終了";
-    VimVisualLine => "vim::VisualLine", "Visual モード (行単位の選択) を開始 / 終了";
-    VimVisualSwapEnds => "vim::VisualSwapEnds", "(Visual) 選択範囲の反対側の端へカーソルを移す";
-    VimNormalMode => "vim::NormalMode", "Insert / Visual モードを抜けて Normal モードへ";
+    VimMoveLeft => "vim::MoveLeft", "(motion) Left", "(モーション) 左へ";
+    VimMoveRight => "vim::MoveRight", "(motion) Right", "(モーション) 右へ";
+    VimMoveUp => "vim::MoveUp", "(motion) Up", "(モーション) 上へ";
+    VimMoveDown => "vim::MoveDown", "(motion) Down", "(モーション) 下へ";
+    VimMoveWordForward => "vim::MoveWordForward", "(motion) Start of the next word", "(モーション) 次の単語の先頭へ";
+    VimMoveWordBackward => "vim::MoveWordBackward", "(motion) Start of the previous word", "(モーション) 前の単語の先頭へ";
+    VimMoveWordEnd => "vim::MoveWordEnd", "(motion) End of the word", "(モーション) 単語の末尾へ";
+    VimMoveToLineStart => "vim::MoveToLineStart", "(motion) Start of the line", "(モーション) 行頭へ";
+    VimMoveToFirstNonBlank => "vim::MoveToFirstNonBlank", "(motion) First non-blank character of the line", "(モーション) 行頭の空白でない文字へ";
+    VimMoveToLineEnd => "vim::MoveToLineEnd", "(motion) End of the line", "(モーション) 行末へ";
+    VimMoveToTop => "vim::MoveToTop", "(motion) First line", "(モーション) 先頭行へ";
+    VimMoveToBottom => "vim::MoveToBottom", "(motion) Last line", "(モーション) 最終行へ";
+    VimInsert => "vim::Insert", "Enter Insert mode at the cursor", "カーソル位置で Insert モードへ";
+    VimAppend => "vim::Append", "Enter Insert mode after the cursor", "カーソルの後ろで Insert モードへ";
+    VimInsertAtLineStart => "vim::InsertAtLineStart", "Enter Insert mode at the start of the line", "行頭で Insert モードへ";
+    VimAppendAtLineEnd => "vim::AppendAtLineEnd", "Enter Insert mode at the end of the line", "行末で Insert モードへ";
+    VimOpenLineBelow => "vim::OpenLineBelow", "Open a line below and enter Insert mode", "下に行を追加して Insert モードへ";
+    VimOpenLineAbove => "vim::OpenLineAbove", "Open a line above and enter Insert mode", "上に行を追加して Insert モードへ";
+    VimDeleteChar => "vim::DeleteChar", "Delete the character under the cursor", "カーソル位置の 1 文字を削除";
+    VimDeleteCharBefore => "vim::DeleteCharBefore", "Delete the character before the cursor", "カーソルの前の 1 文字を削除";
+    VimDeleteToLineEnd => "vim::DeleteToLineEnd", "Delete to the end of the line", "行末まで削除";
+    VimChangeToLineEnd => "vim::ChangeToLineEnd", "Delete to the end of the line and enter Insert mode", "行末まで削除して Insert モードへ";
+    VimSubstituteChar => "vim::SubstituteChar", "Delete one character and enter Insert mode", "1 文字削除して Insert モードへ";
+    VimSubstituteLine => "vim::SubstituteLine", "Clear the line and enter Insert mode", "行を消して Insert モードへ";
+    VimYankLine => "vim::YankLine", "Yank the line", "行をヤンク";
+    VimPasteAfter => "vim::PasteAfter", "Paste the yanked text after the cursor", "ヤンクした内容を後ろに貼り付け";
+    VimPasteBefore => "vim::PasteBefore", "Paste the yanked text before the cursor", "ヤンクした内容を前に貼り付け";
+    VimUndo => "vim::Undo", "Undo", "元に戻す";
+    VimReplaceChar => "vim::ReplaceChar", "Replace one character with the next key pressed", "次に押した文字で 1 文字置換";
+    VimDelete => "vim::Delete", "(operator) Delete. Follow with a motion, or the same key for the whole line", "(オペレータ) 削除。続けてモーション、同じキーで行ごと";
+    VimChange => "vim::Change", "(operator) Delete and enter Insert mode", "(オペレータ) 削除して Insert モードへ";
+    VimYank => "vim::Yank", "(operator) Yank and copy to the clipboard. In Visual mode, applies to the selection", "(オペレータ) ヤンクしてクリップボードにコピー。Visual モードでは選択範囲が対象";
+    VimVisual => "vim::Visual", "Start / end Visual mode (character-wise selection)", "Visual モード (文字単位の選択) を開始 / 終了";
+    VimVisualLine => "vim::VisualLine", "Start / end Visual mode (line-wise selection)", "Visual モード (行単位の選択) を開始 / 終了";
+    VimVisualSwapEnds => "vim::VisualSwapEnds", "(Visual) Move the cursor to the other end of the selection", "(Visual) 選択範囲の反対側の端へカーソルを移す";
+    VimNormalMode => "vim::NormalMode", "Leave Insert / Visual mode and return to Normal mode", "Insert / Visual モードを抜けて Normal モードへ";
 
-    EditorBackspace => "editor::Backspace", "前の 1 文字を削除";
-    EditorDelete => "editor::Delete", "カーソル位置の 1 文字を削除";
-    EditorDeleteWordBefore => "editor::DeleteWordBefore", "直前の単語を削除";
-    EditorMoveLeft => "editor::MoveLeft", "左へ";
-    EditorMoveRight => "editor::MoveRight", "右へ";
-    EditorMoveUp => "editor::MoveUp", "上へ";
-    EditorMoveDown => "editor::MoveDown", "下へ";
-    EditorMoveToLineStart => "editor::MoveToLineStart", "行頭へ";
-    EditorMoveToLineEnd => "editor::MoveToLineEnd", "行末へ";
-    EditorKillToLineEnd => "editor::KillToLineEnd", "行末まで削除";
-    EditorClear => "editor::Clear", "入力内容をすべて消す";
-    EditorNewline => "editor::Newline", "改行";
+    EditorBackspace => "editor::Backspace", "Delete the previous character", "前の 1 文字を削除";
+    EditorDelete => "editor::Delete", "Delete the character under the cursor", "カーソル位置の 1 文字を削除";
+    EditorDeleteWordBefore => "editor::DeleteWordBefore", "Delete the previous word", "直前の単語を削除";
+    EditorMoveLeft => "editor::MoveLeft", "Left", "左へ";
+    EditorMoveRight => "editor::MoveRight", "Right", "右へ";
+    EditorMoveUp => "editor::MoveUp", "Up", "上へ";
+    EditorMoveDown => "editor::MoveDown", "Down", "下へ";
+    EditorMoveToLineStart => "editor::MoveToLineStart", "Start of the line", "行頭へ";
+    EditorMoveToLineEnd => "editor::MoveToLineEnd", "End of the line", "行末へ";
+    EditorKillToLineEnd => "editor::KillToLineEnd", "Delete to the end of the line", "行末まで削除";
+    EditorClear => "editor::Clear", "Clear all input", "入力内容をすべて消す";
+    EditorNewline => "editor::Newline", "Insert a newline", "改行";
 
-    CommandCancel => "command::Cancel", "コマンドラインを閉じる";
-    CommandExecute => "command::Execute", "コマンドを実行";
-    RenameCancel => "rename::Cancel", "名前の変更をやめる";
-    RenameConfirm => "rename::Confirm", "名前を確定";
+    CommandCancel => "command::Cancel", "Close the command line", "コマンドラインを閉じる";
+    CommandExecute => "command::Execute", "Run the command", "コマンドを実行";
+    RenameCancel => "rename::Cancel", "Cancel renaming", "名前の変更をやめる";
+    RenameConfirm => "rename::Confirm", "Confirm the name", "名前を確定";
 }
 
 /// キーバインドが有効になる環境。
@@ -206,23 +209,57 @@ impl Ctx {
 
     pub fn description(self) -> &'static str {
         match self {
-            Ctx::Normal => "NORMAL モード",
-            Ctx::Insert => "INSERT モード (テキスト欄を編集中)",
-            Ctx::Visual => "VISUAL モード (文字を選択中。文字列は変更できない)",
-            Ctx::Command => ": コマンドラインに入力中",
-            Ctx::Rename => "リクエスト名を変更中",
-            Ctx::Help => "ヘルプを表示中 (割り当てのないキーはヘルプを閉じる)",
-            Ctx::TextInput => "文字を入力中 (Insert / Command / Rename のどれか)",
-            Ctx::Collection => "Collection ペインを選択中 (Normal / Insert / Visual のとき)",
-            Ctx::Url => "URL ペインを選択中 (同上)",
-            Ctx::Request => "Request ペインを選択中 (同上)",
-            Ctx::Response => "Response ペインを選択中 (同上)",
-            Ctx::Preview => "Response ペインで Preview タブ (HTML プレビュー) を表示中",
-            Ctx::Editor => "編集できるテキスト欄 (URL / Params / Headers / Body) を選択中",
-            Ctx::TextView => {
+            Ctx::Normal => t!("NORMAL mode", "NORMAL モード"),
+            Ctx::Insert => t!(
+                "INSERT mode (editing a text field)",
+                "INSERT モード (テキスト欄を編集中)"
+            ),
+            Ctx::Visual => t!(
+                "VISUAL mode (selecting text; the text cannot be changed)",
+                "VISUAL モード (文字を選択中。文字列は変更できない)"
+            ),
+            Ctx::Command => t!("Typing in the : command line", ": コマンドラインに入力中"),
+            Ctx::Rename => t!("Renaming a request", "リクエスト名を変更中"),
+            Ctx::Help => t!(
+                "Help is shown (unbound keys close it)",
+                "ヘルプを表示中 (割り当てのないキーはヘルプを閉じる)"
+            ),
+            Ctx::TextInput => t!(
+                "Typing text (any of Insert / Command / Rename)",
+                "文字を入力中 (Insert / Command / Rename のどれか)"
+            ),
+            Ctx::Collection => t!(
+                "Collection pane is focused (in Normal / Insert / Visual)",
+                "Collection ペインを選択中 (Normal / Insert / Visual のとき)"
+            ),
+            Ctx::Url => t!(
+                "URL pane is focused (same as above)",
+                "URL ペインを選択中 (同上)"
+            ),
+            Ctx::Request => t!(
+                "Request pane is focused (same as above)",
+                "Request ペインを選択中 (同上)"
+            ),
+            Ctx::Response => t!(
+                "Response pane is focused (same as above)",
+                "Response ペインを選択中 (同上)"
+            ),
+            Ctx::Preview => t!(
+                "Preview tab (HTML preview) is shown in the Response pane",
+                "Response ペインで Preview タブ (HTML プレビュー) を表示中"
+            ),
+            Ctx::Editor => t!(
+                "An editable text field (URL / Params / Headers / Body) is focused",
+                "編集できるテキスト欄 (URL / Params / Headers / Body) を選択中"
+            ),
+            Ctx::TextView => t!(
+                "Read-only text (cURL tab / Body and Headers tabs of Response) is focused",
                 "読み取り専用のテキスト (cURL タブ / Response の Body・Headers タブ) を選択中"
-            }
-            Ctx::Operator => "d / c / y などオペレータの後のモーション待ち",
+            ),
+            Ctx::Operator => t!(
+                "Waiting for a motion after an operator such as d / c / y",
+                "d / c / y などオペレータの後のモーション待ち"
+            ),
         }
     }
 
@@ -266,7 +303,10 @@ impl ContextExpr {
         let mut pos = 0;
         let expr = parse_or(&tokens, &mut pos)?;
         if pos != tokens.len() {
-            return Err(format!("コンテキスト \"{s}\" の書き方が正しくありません"));
+            return Err(tf!(
+                "Invalid context expression \"{s}\"",
+                "コンテキスト \"{s}\" の書き方が正しくありません"
+            ));
         }
         Ok(expr)
     }
@@ -329,7 +369,8 @@ fn tokenize(s: &str) -> Result<Vec<Token>, String> {
                 tokens.push(Token::Ident(chars[start..i].iter().collect()));
             }
             _ => {
-                return Err(format!(
+                return Err(tf!(
+                    "Context \"{s}\" contains an invalid character '{c}'",
                     "コンテキスト \"{s}\" に使えない文字 '{c}' があります"
                 ));
             }
@@ -366,7 +407,11 @@ fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<ContextExpr, String>
         Some(Token::Open) => {
             let inner = parse_or(tokens, pos)?;
             if tokens.get(*pos) != Some(&Token::Close) {
-                return Err("コンテキストの ( が閉じられていません".to_string());
+                return Err(t!(
+                    "Unclosed ( in the context expression",
+                    "コンテキストの ( が閉じられていません"
+                )
+                .to_string());
             }
             *pos += 1;
             Ok(inner)
@@ -377,12 +422,17 @@ fn parse_unary(tokens: &[Token], pos: &mut usize) -> Result<ContextExpr, String>
             .map(|c| ContextExpr::Is(*c))
             .ok_or_else(|| {
                 let names: Vec<&str> = Ctx::ALL.iter().map(|c| c.name()).collect();
-                format!(
-                    "不明なコンテキスト \"{name}\" (使える名前: {})",
-                    names.join(" / ")
+                let names = names.join(" / ");
+                tf!(
+                    "Unknown context \"{name}\" (available: {names})",
+                    "不明なコンテキスト \"{name}\" (使える名前: {names})"
                 )
             }),
-        _ => Err("コンテキストの書き方が正しくありません".to_string()),
+        _ => Err(t!(
+            "Invalid context expression",
+            "コンテキストの書き方が正しくありません"
+        )
+        .to_string()),
     }
 }
 
@@ -470,12 +520,16 @@ impl KeyStroke {
         } else if let (Some(c), None) = (chars.next(), chars.next()) {
             KeyCode::Char(c)
         } else {
-            return Err(format!("キー \"{s}\" を解釈できません"));
+            return Err(tf!(
+                "Cannot parse key \"{s}\"",
+                "キー \"{s}\" を解釈できません"
+            ));
         };
         let code = match code {
             KeyCode::Char(c) if mods.contains(KeyModifiers::SHIFT) => {
                 if !c.is_alphabetic() {
-                    return Err(format!(
+                    return Err(tf!(
+                        "Key \"{s}\": shift- only works with letters and special keys (write symbols as they are, like \"?\")",
                         "キー \"{s}\": shift- は英字と特殊キーにだけ使えます (記号は \"?\" のようにそのまま書いてください)"
                     ));
                 }
@@ -551,7 +605,7 @@ pub fn parse_keys(s: &str) -> Result<Vec<KeyStroke>, String> {
         .map(KeyStroke::parse)
         .collect::<Result<Vec<_>, _>>()?;
     if keys.is_empty() {
-        return Err("キーが空です".to_string());
+        return Err(t!("The key is empty", "キーが空です").to_string());
     }
     Ok(keys)
 }
@@ -890,17 +944,20 @@ impl Keymap {
     pub fn with_user(sections: &[Section]) -> Result<Self, String> {
         let mut keymap = Self::default();
         for (i, section) in sections.iter().enumerate() {
-            let at = format!("\"keymap\" の {} 番目", i + 1);
+            let n = i + 1;
+            let at = tf!("\"keymap\" entry {n}", "\"keymap\" の {n} 番目");
             let context = ContextExpr::parse(&section.context).map_err(|e| format!("{at}: {e}"))?;
             for (key, name) in &section.bindings {
                 let keys = parse_keys(key).map_err(|e| format!("{at}: {e}"))?;
-                let command =
-                    match name {
-                        None => None,
-                        Some(name) => Some(Command::from_name(name).ok_or_else(|| {
-                            format!("{at} (\"{key}\"): 不明なコマンド \"{name}\"")
-                        })?),
-                    };
+                let command = match name {
+                    None => None,
+                    Some(name) => Some(Command::from_name(name).ok_or_else(|| {
+                        tf!(
+                            "{at} (\"{key}\"): unknown command \"{name}\"",
+                            "{at} (\"{key}\"): 不明なコマンド \"{name}\""
+                        )
+                    })?),
+                };
                 keymap.bindings.push(Binding {
                     context: context.clone(),
                     keys,

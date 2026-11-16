@@ -218,7 +218,7 @@ async fn connection_refused_is_reported() {
         ..Default::default()
     };
     let err = http::send(&client(), &req).await.unwrap_err();
-    assert!(err.to_string().contains("接続エラー"), "{err}");
+    assert!(err.to_string().contains("Connection error"), "{err}");
 }
 
 #[tokio::test]
@@ -234,7 +234,7 @@ async fn timeout_is_reported() {
     )
     .await
     .unwrap_err();
-    assert!(err.to_string().contains("タイムアウト"), "{err}");
+    assert!(err.to_string().contains("Timeout"), "{err}");
 }
 
 /// キー入力 → Action::Send → 実送信 → set_response までの一連の流れ。

@@ -49,7 +49,10 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> io::Result<()> {
     if child.wait()?.success() {
         Ok(())
     } else {
-        Err(io::Error::other(format!("{program} が失敗しました")))
+        Err(io::Error::other(crate::tf!(
+            "{program} failed",
+            "{program} が失敗しました"
+        )))
     }
 }
 
