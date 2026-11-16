@@ -837,6 +837,12 @@ fn draw_help(frame: &mut Frame) {
             "Open the config file (keys above are defaults)",
             "キーバインドの設定ファイルを開く (上は既定のキー)",
         ),
+        (
+            ":vimrc",
+            "",
+            "Open the vimrc file (Vim-style mappings such as imap jj <Esc>)",
+            "vimrc (imap jj <Esc> のような Vim 形式のマッピング) を開く",
+        ),
         ("q / Ctrl+C", "", "Quit", "終了"),
     ];
     let lang = crate::i18n::current();

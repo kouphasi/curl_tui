@@ -248,6 +248,7 @@ pub fn template() -> String {
 // "lang" is the display language: "en" (English, default) or "ja" (Japanese).
 //
 // Key bindings in "keymap" are added on top of (and override) the defaults.
+// Vim-style mappings such as "imap jj <Esc>" go in the vimrc file next to this one (:vimrc).
 //   "context"  : where the bindings are active. Omit it to make them active everywhere
 //   "bindings" : {{ "key": "command name" }}. Use null to disable a key
 // When several bindings match the same key, the one written later wins.
@@ -281,6 +282,7 @@ pub fn template() -> String {
 // "lang" は表示言語です: "en" (英語、既定) または "ja" (日本語)。
 //
 // "keymap" にキーバインドを書くと、既定のキーバインドに追加・上書きされます。
+// "imap jj <Esc>" のような Vim 形式のマッピングは、同じ場所の vimrc ファイルに書きます (:vimrc)。
 //   "context"  : そのバインドが有効になる環境。省略するとどこでも有効です
 //   "bindings" : {{ "キー": "コマンド名" }}。null を指定するとそのキーを無効にします
 // 同じキーが複数当てはまるときは、後に書いたものが優先されます。
@@ -427,6 +429,10 @@ pub fn reference() -> String {
     line(t!(
         "  :w save  :q quit  :wq save and quit  :send send  :help help  :config open this file",
         "  :w 保存  :q 終了  :wq 保存して終了  :send 送信  :help ヘルプ  :config この設定を開く"
+    ));
+    line(t!(
+        "  :vimrc open the vimrc file (Vim-style mappings such as imap jj <Esc>)",
+        "  :vimrc vimrc ファイル (imap jj <Esc> のような Vim 形式のマッピング) を開く"
     ));
     lines.push(marker(REFERENCE_END).to_string());
     lines.join("\n")

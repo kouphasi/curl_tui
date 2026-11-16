@@ -4,6 +4,8 @@
 //! 実際の送信や保存は [`Action`] として呼び出し側 (main) に返す。
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::time::Instant;
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -14,6 +16,7 @@ use crate::curl;
 use crate::editor::TextEditor;
 use crate::keymap::{Command, ContextSet, Ctx, KeyStroke, Keymap, Lookup};
 use crate::model::{self, HttpMethod, Request, Response};
+use crate::vimrc::{MapMode, Vimrc};
 use crate::{t, tf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +208,8 @@ pub enum Action {
     SaveAndQuit(Vec<Request>),
     /// 設定ファイルをエディタで開き、閉じたら読み直す
     EditConfig,
+    /// vimrc ファイルをエディタで開き、閉じたら読み直す
+    EditVimrc,
     /// テキストをクリップボードにコピーする
     Copy(String),
 }
@@ -342,7 +347,25 @@ pub struct App {
     clipboard: Option<String>,
     /// Collection から Ctrl+L で戻る先
     last_right_focus: Focus,
+    /// 設定ファイルの "vimrc" (キー → キーのマッピング)
+    vimrc: Vimrc,
+    /// まだ処理していないキー (Vim の typeahead)。マッピングの続きを待っているか、
+    /// マッピングを展開した結果のキー
+    typeahead: VecDeque<Queued>,
+    /// マッピングの続きのキーを待ち始めた時刻 (待っていないときは None)
+    waiting_since: Option<Instant>,
 }
+
+/// typeahead の 1 キー。
+#[derive(Debug, Clone, Copy)]
+struct Queued {
+    event: KeyEvent,
+    /// マッピングを適用してよいか (noremap の展開結果は false)
+    remap: bool,
+}
+
+/// マッピングの展開を繰り返せる回数 (Vim の maxmapdepth)。
+const MAX_MAP_DEPTH: usize = 1000;
 
 impl App {
     pub fn new(mut collection: Vec<Request>) -> Self {
@@ -393,6 +416,9 @@ impl App {
             visual: Visual::default(),
             clipboard: None,
             last_right_focus: Focus::Url,
+            vimrc: Vimrc::default(),
+            typeahead: VecDeque::new(),
+            waiting_since: None,
         };
         app.load_selected();
         app.sync_curl_view();
@@ -910,6 +936,120 @@ impl App {
         self.clear_pending();
     }
 
+    /// Vim 形式のマッピング (設定ファイルの "vimrc") を設定する。
+    pub fn set_vimrc(&mut self, vimrc: Vimrc) {
+        self.vimrc = vimrc;
+        self.typeahead.clear();
+        self.waiting_since = None;
+    }
+
+    /// マッピングの続きを待つのをやめる時刻 (待っていなければ None)。
+    pub fn key_deadline(&self) -> Option<Instant> {
+        Some(self.waiting_since? + self.vimrc.timeout?)
+    }
+
+    /// 続きのキーが来なかった: 待っていたキーを、当てはまる短いマッピング
+    /// (なければそのままのキー) として処理する。
+    pub fn key_timeout(&mut self) -> Action {
+        self.run_typeahead(true)
+    }
+
+    /// 処理を中断した (Action を返した) キーが残っているか。残っていれば
+    /// [`App::resume_keys`] で続きを処理する。
+    pub fn has_queued_keys(&self) -> bool {
+        self.waiting_since.is_none() && !self.typeahead.is_empty()
+    }
+
+    pub fn resume_keys(&mut self) -> Action {
+        self.run_typeahead(false)
+    }
+
+    /// いまのモードに対応する Vim の map モード。マッピングを使わないときは None。
+    fn map_mode(&self) -> Option<MapMode> {
+        if self.replace.is_some() {
+            // r の後の文字はマッピングしない (Vim と同じ)
+            return None;
+        }
+        match self.mode {
+            Mode::Normal if self.operator.is_some() => Some(MapMode::OperatorPending),
+            Mode::Normal => Some(MapMode::Normal),
+            Mode::Editing => Some(MapMode::Insert),
+            Mode::Visual => Some(MapMode::Visual),
+            Mode::Command | Mode::Rename => Some(MapMode::CmdLine),
+            Mode::Help => None,
+        }
+    }
+
+    /// typeahead のキーを、マッピングを適用しながら順に処理する。main に返す Action が
+    /// 出たらそこで止める (残りは [`App::resume_keys`] で処理する)。`flush` は
+    /// タイムアウト: マッピングの続きを待たない。
+    fn run_typeahead(&mut self, flush: bool) -> Action {
+        let mut depth = 0;
+        loop {
+            if self.typeahead.is_empty() {
+                self.waiting_since = None;
+                return Action::None;
+            }
+            if let Some(mode) = self.map_mode()
+                && !self.vimrc.is_empty()
+                && self.typeahead[0].remap
+            {
+                let seq: Vec<KeyStroke> = self
+                    .typeahead
+                    .iter()
+                    .take_while(|q| q.remap)
+                    .map(|q| KeyStroke::from_event(&q.event))
+                    .collect();
+                let found = self.vimrc.find(mode, &seq);
+                // 続きのキーが来るかもしれない (typeahead の最後まで一致している)
+                let can_grow = found.longer && seq.len() == self.typeahead.len();
+                let nowait = found
+                    .exact
+                    .is_some_and(|m| m.nowait && m.lhs.len() == seq.len());
+                if can_grow && !flush && !nowait {
+                    self.waiting_since = Some(Instant::now());
+                    return Action::None;
+                }
+                if let Some(m) = found.exact {
+                    depth += 1;
+                    if depth > MAX_MAP_DEPTH {
+                        self.typeahead.clear();
+                        self.waiting_since = None;
+                        self.status = t!(
+                            "Recursive mapping (check :vimrc; use noremap)",
+                            "マッピングが再帰しています (:vimrc を確認してください。noremap を使えます)"
+                        )
+                        .to_string();
+                        return Action::None;
+                    }
+                    self.typeahead.drain(..m.lhs.len());
+                    // 右辺が左辺で始まるときは、その最初のキーはマッピングしない (Vim と同じ)
+                    let starts_with_lhs = m.rhs.starts_with(&m.lhs);
+                    for (i, k) in m.rhs.iter().enumerate().rev() {
+                        self.typeahead.push_front(Queued {
+                            event: KeyEvent::new(k.code, k.mods),
+                            remap: !m.noremap && !(i == 0 && starts_with_lhs),
+                        });
+                    }
+                    continue;
+                }
+            }
+            let Some(q) = self.typeahead.pop_front() else {
+                continue;
+            };
+            self.waiting_since = None;
+            let action = self.process_key(q.event);
+            self.sync_curl_view();
+            let action = match (action, self.clipboard.take()) {
+                (Action::None, Some(text)) => Action::Copy(text),
+                (action, _) => action,
+            };
+            if action != Action::None {
+                return action;
+            }
+        }
+    }
+
     fn clear_pending(&mut self) {
         self.keys.clear();
         self.operator = None;
@@ -917,12 +1057,11 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
-        let action = self.process_key(key);
-        self.sync_curl_view();
-        match (action, self.clipboard.take()) {
-            (Action::None, Some(text)) => Action::Copy(text),
-            (action, _) => action,
-        }
+        self.typeahead.push_back(Queued {
+            event: key,
+            remap: true,
+        });
+        self.run_typeahead(false)
     }
 
     fn process_key(&mut self, key: KeyEvent) -> Action {
@@ -1031,6 +1170,10 @@ impl App {
             C::AppOpenConfig => {
                 self.back_to_normal();
                 return Action::EditConfig;
+            }
+            C::AppOpenVimrc => {
+                self.back_to_normal();
+                return Action::EditVimrc;
             }
             C::AppShowHelp => {
                 self.back_to_normal();
@@ -1421,6 +1564,7 @@ impl App {
                 Action::None
             }
             "config" | "keymap" => Action::EditConfig,
+            "vimrc" => Action::EditVimrc,
             _ => {
                 self.status = tf!("Unknown command: :{cmd}", "不明なコマンド: :{cmd}");
                 Action::None
@@ -1893,6 +2037,11 @@ impl App {
         }
         for key in &self.keys {
             shown.push_str(&key.short());
+        }
+        if self.waiting_since.is_some() {
+            for q in &self.typeahead {
+                shown.push_str(&KeyStroke::from_event(&q.event).short());
+            }
         }
         shown
     }
@@ -2585,6 +2734,9 @@ mod tests {
         type_str(&mut app, ":config");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::EditConfig);
         assert_eq!(app.mode, Mode::Normal);
+        type_str(&mut app, ":vimrc");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::EditVimrc);
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]
@@ -2635,6 +2787,134 @@ mod tests {
         // 続きが来なかった j は普通の文字として入力される
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.url.text(), "http://ajxj");
+    }
+
+    fn app_with_vimrc(lines: &[&str]) -> App {
+        let mut app = app_with_config("{}");
+        app.set_vimrc(crate::vimrc::parse(lines).unwrap());
+        app
+    }
+
+    #[test]
+    fn vimrc_imap_jj_to_escape() {
+        let mut app = app_with_vimrc(&["imap jj <Esc>"]);
+        type_str(&mut app, "A");
+        type_str(&mut app, "x");
+        assert_eq!(app.url.text(), "http://ax");
+        // 1 つ目の j は続きを待つ
+        type_str(&mut app, "j");
+        assert_eq!(app.url.text(), "http://ax");
+        assert_eq!(app.pending_keys(), "j");
+        assert!(app.key_deadline().is_some());
+        type_str(&mut app, "j");
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.url.text(), "http://ax");
+        assert_eq!(app.key_deadline(), None);
+
+        // 続きが別のキーなら j はそのまま入力される
+        type_str(&mut app, "Ajkj");
+        assert_eq!(app.url.text(), "http://axjk");
+        assert_eq!(app.mode, Mode::Editing);
+        // タイムアウトでも j として入力される
+        assert_eq!(app.key_timeout(), Action::None);
+        assert_eq!(app.url.text(), "http://axjkj");
+        assert_eq!(app.pending_keys(), "");
+        // Normal モードでは j はマッピングされない
+        app.handle_key(key(KeyCode::Esc));
+        type_str(&mut app, "jj");
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.key_deadline(), None);
+    }
+
+    #[test]
+    fn vimrc_leader_runs_command_line() {
+        let mut app = app_with_vimrc(&[
+            "let mapleader = ' '",
+            "nnoremap <Leader>w :w<CR>",
+            "nnoremap <Leader>q :wq<CR>",
+            "nnoremap q <Nop>",
+        ]);
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.pending_keys(), "<space>");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('w'))),
+            Action::Save(_)
+        ));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Action::None);
+        // Space の後のタイムアウトは既定の Space (右へ) として動く
+        type_str(&mut app, "0 ");
+        app.key_timeout();
+        assert_eq!(app.url.cursor(), (0, 1));
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('q'))),
+            Action::SaveAndQuit(_)
+        ));
+    }
+
+    #[test]
+    fn vimrc_recursive_and_noremap() {
+        // map は展開後のキーにもマッピングを適用し、noremap は適用しない
+        let mut app = app_with_vimrc(&["nmap X Y", "nmap Y $", "nnoremap Z X"]);
+        type_str(&mut app, "X");
+        assert_eq!(app.url.cursor(), (0, 7));
+        type_str(&mut app, "0Z");
+        // Z → X (マッピングしない) → 既定の X (前の 1 文字を削除) は行頭なので何もしない
+        assert_eq!(app.url.cursor(), (0, 0));
+        assert_eq!(app.url.text(), "http://a");
+
+        // 右辺が左辺で始まるときは、最初のキーを再びマッピングしない
+        let mut app = app_with_vimrc(&["nmap x xl"]);
+        type_str(&mut app, "0x");
+        assert_eq!(app.url.text(), "ttp://a");
+
+        // 無限に再帰するマッピングは止める
+        let mut app = app_with_vimrc(&["nmap a b", "nmap b a"]);
+        type_str(&mut app, "a");
+        assert!(app.status.contains("Recursive"), "{}", app.status);
+        assert!(!app.has_queued_keys());
+    }
+
+    #[test]
+    fn vimrc_multiple_actions_are_resumed() {
+        // 1 つのマッピングで保存と送信: 最初の Action で止まり、残りは resume_keys で
+        let mut app = app_with_vimrc(&["nnoremap S :w<CR><C-r>"]);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('S'))),
+            Action::Save(_)
+        ));
+        assert!(app.has_queued_keys());
+        assert!(matches!(app.resume_keys(), Action::Send(_)));
+        assert!(!app.has_queued_keys());
+    }
+
+    #[test]
+    fn vimrc_modes() {
+        let mut app = app_with_vimrc(&[
+            "vnoremap Y y",
+            "onoremap L $",
+            "cnoremap <C-a> config",
+            "inoremap <C-l> <Right>",
+            "set notimeout",
+        ]);
+        // オペレータの後: dL で行末まで削除
+        type_str(&mut app, "0wdL");
+        assert_eq!(app.url.text(), "http");
+        // : コマンドライン
+        type_str(&mut app, ":");
+        app.handle_key(ctrl('a'));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::EditConfig);
+        // Visual
+        type_str(&mut app, "0vl");
+        assert_eq!(copied(app.handle_key(key(KeyCode::Char('Y')))), "ht");
+        // Insert
+        type_str(&mut app, "0i");
+        app.handle_key(ctrl('l'));
+        type_str(&mut app, "X");
+        assert_eq!(app.url.text(), "hXttp");
+        // notimeout: 待ち時間なし (続きのキーが無いマッピングでは待たない)
+        assert_eq!(app.key_deadline(), None);
     }
 
     #[test]

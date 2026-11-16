@@ -17,6 +17,7 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 - Visual モードでの文字選択とクリップボードへのコピー (`v` / `V` → `y`。cURL タブやレスポンスの Body / Headers でも可)
 - コレクション管理 (新規 / 複製 / 削除 / 名前変更) と JSON ファイルへの保存
 - キーバインドのカスタマイズ (JSONC の設定ファイル。`:config` でエディタが開き、保存して閉じると反映)
+- Vim 形式のキーマッピング (`~/.config/curl_tui/vimrc` に `imap jj <Esc>` のように書ける。`:vimrc` で編集)
 - 表示言語は英語 (既定) / 日本語 (設定ファイルに `"lang": "ja"`)
 - マウス操作 (クリックでペイン / リクエスト / タブ / カーソル位置を選択、ホイールでスクロール)
 - ブラケットペースト対応、日本語などの全角文字の入力に対応
@@ -71,6 +72,7 @@ Normal はブロックカーソル、Insert はバーカーソルで表示され
 | `H` / `L`, `gT` / `gt`, `1`-`4` | タブ切り替え |
 | `?` | ヘルプ |
 | `:config` | キーバインドの設定ファイルをエディタで開く |
+| `:vimrc` | Vim 形式のマッピング (vimrc) をエディタで開く |
 | `q` / `Ctrl+C` | 終了 |
 
 #### マウス
@@ -208,7 +210,47 @@ GUI のエディタを使う場合は、`EDITOR="code --wait"` のように閉�
 | 環境変数 | 意味 |
 | --- | --- |
 | `CURL_TUI_CONFIG` | 設定ファイルの場所を変える |
+| `CURL_TUI_VIMRC` | vimrc の場所を変える (既定は設定ファイルと同じディレクトリの `vimrc`) |
 | `VISUAL` / `EDITOR` | `:config` で使うエディタ |
+
+## Vim 形式のマッピング (vimrc)
+
+`~/.config/curl_tui/vimrc` (`config.jsonc` と同じディレクトリ) に、`.vimrc` と同じ書き方でキーマッピングを書けます。
+TUI で `:vimrc` を実行するとエディタで開き、保存して閉じるとその場で反映されます (初回は例とリファレンスをコメントで書いた雛形が作られます)。
+`"keymap"` が「キー → コマンド」なのに対し、こちらは Vim と同じ「キー → キー列」の置き換えです。
+
+```vim
+" コメント
+imap jj <Esc>
+let mapleader = ' '
+nnoremap <Leader>w :w<CR>
+nnoremap <Leader>s <C-r>
+nnoremap q <Nop>
+vnoremap Y y
+set timeoutlen=500
+```
+
+| コマンド | 有効なモード |
+| --- | --- |
+| `imap` / `inoremap` | Insert |
+| `nmap` / `nnoremap` | Normal |
+| `vmap` / `xmap` / `vnoremap` / `xnoremap` | Visual |
+| `omap` / `onoremap` | オペレータ (`d` / `c` / `y`) の後 |
+| `cmap` / `cnoremap` | `:` コマンドライン・リクエスト名の入力欄 |
+| `map` / `noremap` | Normal + Visual + オペレータの後 |
+| `map!` / `noremap!` | Insert + コマンドライン |
+| `unmap` / `nunmap` / `iunmap` / … | 前に書いたマッピングを取り消す |
+
+- 右辺は「代わりに押すキー」なので、`:w<CR>` のような `:` コマンドや `"keymap"` で割り当てたキーも含め、手で打てるものは何でも書けます
+- `map` 系は展開後のキーにもマッピングを適用し、`noremap` 系は適用しません (Vim と同じ)
+- 続きのキーが `timeoutlen` (既定 1000 ミリ秒) の間に来なければ、押したキーはそのまま (または短いマッピングとして) 処理されます。
+  `jj` のマッピングがあっても `j` を 1 回だけ打てば、少し待つと `j` が入力されます。`set notimeout` で待ち続けます
+- `<Leader>` はマッピングを書いた時点の `mapleader` で展開されます (既定は `\`)。`let mapleader` はマッピングより前に書いてください
+- キーの表記: `<Esc>` `<CR>` `<Tab>` `<S-Tab>` `<BS>` `<Del>` `<Space>` `<Up>` `<F5>` `<C-x>` `<M-x>` (`<A-x>`)
+  `<lt>` `<Bar>` `<Bslash>` `<Leader>` `<LocalLeader>`。`<silent>` などの引数は書けますが無視します (`<nowait>` は有効)
+- 既定のキーを無効にするには `nnoremap q <Nop>` のように `<Nop>` に割り当てます
+- 対応していないコマンド (`set number` / `autocmd` / `<expr>` など) はエラーになり、ステータス行に何行目かが表示されます
+- 場所は環境変数 `CURL_TUI_VIMRC` で変えられます
 
 ## HTML プレビュー (Preview タブ)
 
@@ -253,6 +295,7 @@ src/
 ├── app.rs         # アプリ状態と Vim 風キー処理 (I/O を持たない状態機械)
 ├── keymap.rs      # コマンド名 / コンテキスト / 既定のキーバインド
 ├── config.rs      # 設定ファイル (JSONC) の読み込みと雛形の生成
+├── vimrc.rs       # vimrc ファイル (Vim 形式のキーマッピング) の読み込みと雛形の生成
 ├── i18n.rs        # 表示言語 (英語 / 日本語) の切り替え
 ├── ui.rs          # Ratatui による描画
 ├── editor.rs      # 単一行 / 複数行テキストエディタ (単語移動・範囲削除・undo)
