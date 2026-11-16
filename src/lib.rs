@@ -1,6 +1,7 @@
 //! curl_tui: Postman ライクな TUI HTTP クライアント。
 
 pub mod app;
+pub mod clipboard;
 pub mod collection;
 pub mod config;
 pub mod curl;

@@ -499,6 +499,102 @@ impl TextEditor {
     fn clamp_col(&mut self) {
         self.col = self.col.min(char_len(&self.lines[self.row]));
     }
+
+    // ---- 折り返し表示 (cURL / Response などの読み取り専用ビュー) ----
+
+    /// row 行を表示幅 `width` で折り返したときの、各表示行の開始列 (文字単位)。
+    /// `width` が 0 なら折り返さない。
+    pub fn wrap_starts(&self, row: usize, width: usize) -> Vec<usize> {
+        let mut starts = vec![0];
+        wrap_line(&self.lines[row], width, |col| starts.push(col));
+        starts
+    }
+
+    /// row 行を折り返したときの表示行数。
+    pub fn wrapped_rows(&self, row: usize, width: usize) -> usize {
+        let mut rows = 1;
+        wrap_line(&self.lines[row], width, |_| rows += 1);
+        rows
+    }
+
+    /// 全体を折り返したときの表示行数。
+    pub fn visual_rows(&self, width: usize) -> usize {
+        (0..self.lines.len())
+            .map(|row| self.wrapped_rows(row, width))
+            .sum()
+    }
+
+    /// カーソルのある表示行 (先頭から数えた番号)。
+    pub fn cursor_visual_row(&self, width: usize) -> usize {
+        let above: usize = (0..self.row).map(|row| self.wrapped_rows(row, width)).sum();
+        let starts = self.wrap_starts(self.row, width);
+        above + starts.iter().rposition(|s| *s <= self.col).unwrap_or(0)
+    }
+
+    /// カーソルの、折り返した表示行の中での表示列。
+    pub fn cursor_visual_col(&self, width: usize) -> usize {
+        let starts = self.wrap_starts(self.row, width);
+        let start = starts
+            .iter()
+            .rev()
+            .find(|s| **s <= self.col)
+            .copied()
+            .unwrap_or(0);
+        let line = &self.lines[self.row];
+        line[byte_index(line, start)..byte_index(line, self.col)].width()
+    }
+
+    /// 表示行 `vrow`・表示列 `display_col` にある文字の位置。範囲外は近い位置に丸める。
+    pub fn pos_at_visual(&self, vrow: usize, display_col: usize, width: usize) -> (usize, usize) {
+        let mut first = 0;
+        let mut row = self.lines.len() - 1;
+        for r in 0..self.lines.len() {
+            let rows = self.wrapped_rows(r, width);
+            if vrow < first + rows {
+                row = r;
+                break;
+            }
+            if r + 1 < self.lines.len() {
+                first += rows;
+            }
+        }
+        let starts = self.wrap_starts(row, width);
+        let seg = (vrow.saturating_sub(first)).min(starts.len() - 1);
+        let start = starts[seg];
+        // 折り返しの途中の行では、その表示行の最後の文字までにとどめる
+        let end = match starts.get(seg + 1) {
+            Some(next) => next - 1,
+            None => self.line_len(row),
+        };
+        let mut used = 0;
+        for (i, c) in self.lines[row].chars().enumerate().skip(start) {
+            if i >= end {
+                break;
+            }
+            used += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if display_col < used {
+                return (row, i);
+            }
+        }
+        (row, end)
+    }
+}
+
+/// `line` を表示幅 `width` で折り返し、2 行目以降の開始列 (文字単位) を `on_wrap` に渡す。
+fn wrap_line(line: &str, width: usize, mut on_wrap: impl FnMut(usize)) {
+    // 表示幅はバイト数を超えないので、短い行は数えるまでもない
+    if width == 0 || line.len() <= width {
+        return;
+    }
+    let mut used = 0;
+    for (i, c) in line.chars().enumerate() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > width && used > 0 {
+            on_wrap(i);
+            used = 0;
+        }
+        used += w;
+    }
 }
 
 fn char_len(s: &str) -> usize {
@@ -708,5 +804,35 @@ mod tests {
         e.delete_word_before();
         e.delete_word_before();
         assert_eq!(e.text(), "");
+    }
+
+    #[test]
+    fn wrapping_maps_between_cursor_and_screen() {
+        let mut e = TextEditor::multi_line("abcdefgh\n\nあいうえ");
+        assert_eq!(e.wrap_starts(0, 3), vec![0, 3, 6]);
+        assert_eq!(e.wrap_starts(0, 0), vec![0]);
+        assert_eq!(e.wrap_starts(1, 3), vec![0]);
+        // 全角文字は 2 カラム。幅 3 には 1 文字ずつしか入らない
+        assert_eq!(e.wrap_starts(2, 3), vec![0, 1, 2, 3]);
+        assert_eq!(e.wrap_starts(2, 4), vec![0, 2]);
+        assert_eq!(e.visual_rows(3), 3 + 1 + 4);
+        assert_eq!(e.visual_rows(0), 3);
+
+        e.set_cursor(0, 7);
+        assert_eq!(e.cursor_visual_row(3), 2);
+        assert_eq!(e.cursor_visual_col(3), 1);
+        e.set_cursor(2, 3);
+        assert_eq!(e.cursor_visual_row(4), 4);
+        assert_eq!(e.cursor_visual_col(4), 2);
+
+        assert_eq!(e.pos_at_visual(0, 1, 3), (0, 1));
+        assert_eq!(e.pos_at_visual(1, 0, 3), (0, 3));
+        // 折り返した行の右端より先は、その表示行の最後の文字
+        assert_eq!(e.pos_at_visual(1, 9, 3), (0, 5));
+        assert_eq!(e.pos_at_visual(2, 9, 3), (0, 8));
+        assert_eq!(e.pos_at_visual(3, 2, 3), (1, 0));
+        assert_eq!(e.pos_at_visual(4, 3, 4), (2, 3));
+        // 最終行より下は最終行
+        assert_eq!(e.pos_at_visual(99, 0, 4), (2, 2));
     }
 }

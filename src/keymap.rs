@@ -120,8 +120,11 @@ commands! {
     VimReplaceChar => "vim::ReplaceChar", "次に押した文字で 1 文字置換";
     VimDelete => "vim::Delete", "(オペレータ) 削除。続けてモーション、同じキーで行ごと";
     VimChange => "vim::Change", "(オペレータ) 削除して Insert モードへ";
-    VimYank => "vim::Yank", "(オペレータ) ヤンク";
-    VimNormalMode => "vim::NormalMode", "Insert モードを抜けて Normal モードへ";
+    VimYank => "vim::Yank", "(オペレータ) ヤンクしてクリップボードにコピー。Visual モードでは選択範囲が対象";
+    VimVisual => "vim::Visual", "Visual モード (文字単位の選択) を開始 / 終了";
+    VimVisualLine => "vim::VisualLine", "Visual モード (行単位の選択) を開始 / 終了";
+    VimVisualSwapEnds => "vim::VisualSwapEnds", "(Visual) 選択範囲の反対側の端へカーソルを移す";
+    VimNormalMode => "vim::NormalMode", "Insert / Visual モードを抜けて Normal モードへ";
 
     EditorBackspace => "editor::Backspace", "前の 1 文字を削除";
     EditorDelete => "editor::Delete", "カーソル位置の 1 文字を削除";
@@ -147,6 +150,7 @@ commands! {
 pub enum Ctx {
     Normal,
     Insert,
+    Visual,
     Command,
     Rename,
     Help,
@@ -157,13 +161,15 @@ pub enum Ctx {
     Response,
     Preview,
     Editor,
+    TextView,
     Operator,
 }
 
 impl Ctx {
-    pub const ALL: [Ctx; 13] = [
+    pub const ALL: [Ctx; 15] = [
         Ctx::Normal,
         Ctx::Insert,
+        Ctx::Visual,
         Ctx::Command,
         Ctx::Rename,
         Ctx::Help,
@@ -174,6 +180,7 @@ impl Ctx {
         Ctx::Response,
         Ctx::Preview,
         Ctx::Editor,
+        Ctx::TextView,
         Ctx::Operator,
     ];
 
@@ -181,6 +188,7 @@ impl Ctx {
         match self {
             Ctx::Normal => "Normal",
             Ctx::Insert => "Insert",
+            Ctx::Visual => "Visual",
             Ctx::Command => "Command",
             Ctx::Rename => "Rename",
             Ctx::Help => "Help",
@@ -191,6 +199,7 @@ impl Ctx {
             Ctx::Response => "Response",
             Ctx::Preview => "Preview",
             Ctx::Editor => "Editor",
+            Ctx::TextView => "TextView",
             Ctx::Operator => "Operator",
         }
     }
@@ -199,16 +208,20 @@ impl Ctx {
         match self {
             Ctx::Normal => "NORMAL モード",
             Ctx::Insert => "INSERT モード (テキスト欄を編集中)",
+            Ctx::Visual => "VISUAL モード (文字を選択中。文字列は変更できない)",
             Ctx::Command => ": コマンドラインに入力中",
             Ctx::Rename => "リクエスト名を変更中",
             Ctx::Help => "ヘルプを表示中 (割り当てのないキーはヘルプを閉じる)",
             Ctx::TextInput => "文字を入力中 (Insert / Command / Rename のどれか)",
-            Ctx::Collection => "Collection ペインを選択中 (Normal / Insert のとき)",
+            Ctx::Collection => "Collection ペインを選択中 (Normal / Insert / Visual のとき)",
             Ctx::Url => "URL ペインを選択中 (同上)",
             Ctx::Request => "Request ペインを選択中 (同上)",
             Ctx::Response => "Response ペインを選択中 (同上)",
             Ctx::Preview => "Response ペインで Preview タブ (HTML プレビュー) を表示中",
             Ctx::Editor => "編集できるテキスト欄 (URL / Params / Headers / Body) を選択中",
+            Ctx::TextView => {
+                "読み取り専用のテキスト (cURL タブ / Response の Body・Headers タブ) を選択中"
+            }
             Ctx::Operator => "d / c / y などオペレータの後のモーション待ち",
         }
     }
@@ -695,6 +708,82 @@ pub const DEFAULTS: &[(&str, &[(&str, Command)])] = &[
             ("d", Command::VimDelete),
             ("c", Command::VimChange),
             ("y", Command::VimYank),
+            ("v", Command::VimVisual),
+            ("shift-v", Command::VimVisualLine),
+        ],
+    ),
+    // 読み取り専用のテキスト: 移動と選択・ヤンクだけ (Response のスクロールより優先する)
+    (
+        "Normal && TextView",
+        &[
+            ("h", Command::VimMoveLeft),
+            ("left", Command::VimMoveLeft),
+            ("backspace", Command::VimMoveLeft),
+            ("l", Command::VimMoveRight),
+            ("right", Command::VimMoveRight),
+            ("space", Command::VimMoveRight),
+            ("k", Command::VimMoveUp),
+            ("up", Command::VimMoveUp),
+            ("j", Command::VimMoveDown),
+            ("down", Command::VimMoveDown),
+            ("w", Command::VimMoveWordForward),
+            ("b", Command::VimMoveWordBackward),
+            ("e", Command::VimMoveWordEnd),
+            ("0", Command::VimMoveToLineStart),
+            ("home", Command::VimMoveToLineStart),
+            ("^", Command::VimMoveToFirstNonBlank),
+            ("$", Command::VimMoveToLineEnd),
+            ("end", Command::VimMoveToLineEnd),
+            ("g g", Command::VimMoveToTop),
+            ("shift-g", Command::VimMoveToBottom),
+            ("enter", Command::VimMoveDown),
+            ("shift-y", Command::VimYankLine),
+            ("y", Command::VimYank),
+            ("v", Command::VimVisual),
+            ("shift-v", Command::VimVisualLine),
+        ],
+    ),
+    (
+        "Visual",
+        &[
+            ("h", Command::VimMoveLeft),
+            ("left", Command::VimMoveLeft),
+            ("backspace", Command::VimMoveLeft),
+            ("l", Command::VimMoveRight),
+            ("right", Command::VimMoveRight),
+            ("space", Command::VimMoveRight),
+            ("k", Command::VimMoveUp),
+            ("up", Command::VimMoveUp),
+            ("j", Command::VimMoveDown),
+            ("down", Command::VimMoveDown),
+            ("w", Command::VimMoveWordForward),
+            ("b", Command::VimMoveWordBackward),
+            ("e", Command::VimMoveWordEnd),
+            ("0", Command::VimMoveToLineStart),
+            ("home", Command::VimMoveToLineStart),
+            ("^", Command::VimMoveToFirstNonBlank),
+            ("$", Command::VimMoveToLineEnd),
+            ("end", Command::VimMoveToLineEnd),
+            ("g g", Command::VimMoveToTop),
+            ("shift-g", Command::VimMoveToBottom),
+            ("v", Command::VimVisual),
+            ("shift-v", Command::VimVisualLine),
+            ("o", Command::VimVisualSwapEnds),
+            ("y", Command::VimYank),
+            ("escape", Command::VimNormalMode),
+        ],
+    ),
+    (
+        "Visual && Response",
+        &[
+            ("ctrl-e", Command::ResponseScrollDown),
+            ("ctrl-y", Command::ResponseScrollUp),
+            ("ctrl-d", Command::ResponseHalfPageDown),
+            ("ctrl-u", Command::ResponseHalfPageUp),
+            ("ctrl-f", Command::ResponsePageDown),
+            ("pagedown", Command::ResponsePageDown),
+            ("ctrl-b", Command::ResponsePageUp),
+            ("pageup", Command::ResponsePageUp),
         ],
     ),
     (
