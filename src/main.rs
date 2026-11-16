@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use curl_tui::{
     app::{Action, App, Mode, PreviewState, ResponseState},
-    collection, http, kitty,
+    clipboard, collection, http, kitty,
     model::Response,
     preview,
 };
@@ -162,6 +162,11 @@ async fn run(
                         // 保存できなければ終了しない
                         Err(e) => app.status = format!("保存に失敗: {e:#}"),
                     },
+                    Action::Copy(text) => {
+                        if let Err(e) = clipboard::copy(&text, &mut std::io::stdout()) {
+                            app.status = format!("コピーに失敗: {e}");
+                        }
+                    }
                 }
             }
             Some(res) = rx.recv() => app.set_response(res),

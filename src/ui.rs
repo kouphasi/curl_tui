@@ -10,9 +10,8 @@ use ratatui::{
 
 use crate::app::{
     App, EditorRegion, Focus, Mode, PREVIEW_ZOOM_DEFAULT, PreviewState, Regions, RequestTab,
-    ResponseState, ResponseTab, SPINNER,
+    ResponseState, ResponseTab, SPINNER, Selection,
 };
-use crate::curl;
 use crate::editor::TextEditor;
 use crate::model::{HttpMethod, format_size};
 
@@ -105,6 +104,8 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let mode = match app.mode {
         Mode::Normal => Span::raw(" NORMAL ").black().on_blue(),
         Mode::Editing => Span::raw(" INSERT ").black().on_green(),
+        Mode::Visual if app.visual.linewise => Span::raw(" V-LINE ").black().on_light_magenta(),
+        Mode::Visual => Span::raw(" VISUAL ").black().on_light_magenta(),
         Mode::Command => Span::raw(" COMMAND ").black().on_yellow(),
         Mode::Rename => Span::raw(" RENAME ").black().on_magenta(),
         Mode::Help => Span::raw(" HELP ").black().on_cyan(),
@@ -137,7 +138,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         let [colon, input] =
             Layout::horizontal([Constraint::Length(1), Constraint::Min(1)]).areas(area);
         frame.render_widget(Paragraph::new(":"), colon);
-        let _ = draw_editor(frame, &app.command, Block::new(), input, true, "");
+        let _ = draw_editor(frame, &app.command, Block::new(), input, true, None, "");
         return;
     }
     let editor_focused = editor_focused(app);
@@ -146,6 +147,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("Esc", "Normal へ"),
             ("Ctrl+W", "単語削除"),
             ("Ctrl+R", "送信"),
+        ],
+        (Mode::Visual, _) => &[
+            ("hjkl/w/b/e", "範囲"),
+            ("y", "コピー"),
+            ("v/V", "文字/行"),
+            ("Esc", "解除"),
         ],
         (Mode::Rename, _) => &[("Enter", "確定"), ("Esc", "キャンセル")],
         (_, Focus::Collection) => &[
@@ -168,7 +175,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ("H/L", "タブ"),
             ("Ctrl+R", "送信"),
         ],
-        (_, Focus::Request) => &[("H/L,1-4", "タブ"), ("Ctrl+R", "送信")],
+        (_, Focus::Request) => &[
+            ("v/V", "選択"),
+            ("y", "コピー"),
+            ("H/L,1-4", "タブ"),
+            ("Ctrl+R", "送信"),
+        ],
         (_, Focus::Response)
             if app.response_tab == ResponseTab::Preview && app.preview_unavailable.is_none() =>
         {
@@ -180,9 +192,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             ]
         }
         (_, Focus::Response) => &[
-            ("j/k", "スクロール"),
+            ("hjkl/w/b", "移動"),
+            ("v/V", "選択"),
+            ("y", "コピー"),
             ("Ctrl+D/U", "半ページ"),
-            ("gg/G", "先頭/末尾"),
             ("H/L", "タブ"),
         ],
     };
@@ -207,9 +220,14 @@ fn editor_focused(app: &App) -> bool {
     }
 }
 
-/// テキスト欄にカーソルを表示するか (Normal / Insert どちらでも表示する)。
+/// テキスト欄にカーソルを表示するか (Normal / Insert / Visual で表示する)。
 fn show_cursor(app: &App, focus: Focus) -> bool {
-    app.focus == focus && matches!(app.mode, Mode::Normal | Mode::Editing)
+    app.focus == focus && matches!(app.mode, Mode::Normal | Mode::Editing | Mode::Visual)
+}
+
+/// `focus` のペインで選択中の範囲 (Visual モード)。
+fn selection(app: &App, focus: Focus) -> Option<Selection> {
+    app.selection().filter(|_| app.focus == focus)
 }
 
 fn draw_collection(frame: &mut Frame, app: &App, area: Rect) {
@@ -268,6 +286,7 @@ fn draw_url(frame: &mut Frame, app: &App, area: Rect) {
         block(app, Focus::Url, title),
         url_area,
         editing,
+        selection(app, Focus::Url),
         "https://...",
     );
     let mut regions = app.regions.borrow_mut();
@@ -293,6 +312,7 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(tabs, tab_area);
 
     let editing = show_cursor(app, Focus::Request);
+    let sel = selection(app, Focus::Request);
     let editor = match app.request_tab {
         RequestTab::Params => Some(draw_editor(
             frame,
@@ -300,6 +320,7 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
             Block::new(),
             body_area,
             editing,
+            sel,
             "key=value  (1 行 1 件 / # で無効化)",
         )),
         RequestTab::Headers => Some(draw_editor(
@@ -308,6 +329,7 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
             Block::new(),
             body_area,
             editing,
+            sel,
             "Header-Name: value  (1 行 1 件 / # で無効化)",
         )),
         RequestTab::Body => Some(draw_editor(
@@ -316,18 +338,18 @@ fn draw_request(frame: &mut Frame, app: &App, area: Rect) {
             Block::new(),
             body_area,
             editing,
+            sel,
             "リクエストボディ",
         )),
-        RequestTab::Curl => {
-            let curl = curl::to_curl(&app.current_request());
-            frame.render_widget(
-                Paragraph::new(curl)
-                    .fg(Color::Cyan)
-                    .wrap(Wrap { trim: false }),
-                body_area,
-            );
-            None
-        }
+        RequestTab::Curl => Some(draw_view(
+            frame,
+            &app.curl_view,
+            body_area,
+            app.curl_scroll,
+            editing,
+            sel,
+            ViewStyle::Plain(Style::new().fg(Color::Cyan)),
+        )),
     };
     let mut regions = app.regions.borrow_mut();
     regions.request = area;
@@ -365,6 +387,7 @@ fn draw_editor(
     blk: Block,
     area: Rect,
     editing: bool,
+    selection: Option<Selection>,
     placeholder: &str,
 ) -> EditorRegion {
     let inner = blk.inner(area);
@@ -384,7 +407,13 @@ fn draw_editor(
             editor
                 .lines()
                 .iter()
-                .map(|l| Line::from(l.as_str()))
+                .enumerate()
+                .map(|(row, l)| match &selection {
+                    Some(sel) if sel.start.0 <= row && row <= sel.end.0 => {
+                        styled_line(l.chars().enumerate(), row, Some(sel), |_| Style::new())
+                    }
+                    _ => Line::from(l.as_str()),
+                })
                 .collect::<Vec<_>>(),
         )
     };
@@ -402,6 +431,122 @@ fn draw_editor(
         area: inner,
         scroll_x,
         scroll_y,
+        wrap: false,
+    }
+}
+
+/// 1 行分の文字 (列番号つき) を、選択範囲を反転表示した `Line` にする。
+fn styled_line(
+    chars: impl Iterator<Item = (usize, char)>,
+    row: usize,
+    selection: Option<&Selection>,
+    base: impl Fn(usize) -> Style,
+) -> Line<'static> {
+    let selected = |col| selection.is_some_and(|s| s.contains(row, col));
+    let highlight = Modifier::REVERSED;
+    let mut spans: Vec<Span> = Vec::new();
+    let mut run = String::new();
+    let mut run_style = Style::new();
+    let mut empty = true;
+    for (col, c) in chars {
+        empty = false;
+        let mut style = base(col);
+        if selected(col) {
+            style = style.add_modifier(highlight);
+        }
+        if style != run_style && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), run_style));
+        }
+        run_style = style;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, run_style));
+    }
+    // 空行も選択されていると分かるように 1 文字分だけ反転する
+    if empty && selected(0) {
+        spans.push(Span::styled(" ", Style::new().add_modifier(highlight)));
+    }
+    Line::from(spans)
+}
+
+/// 読み取り専用ビューの文字の色付け。
+enum ViewStyle {
+    Plain(Style),
+    /// `Name: value` のヘッダー名に色を付ける
+    HeaderKeys,
+}
+
+/// 読み取り専用のテキスト (cURL / Response) を折り返して描画する。
+/// `scroll` は折り返し後の行数。カーソルを表示するときは、カーソルが見える位置に補正する。
+#[must_use]
+fn draw_view(
+    frame: &mut Frame,
+    view: &TextEditor,
+    area: Rect,
+    scroll: u16,
+    cursor: bool,
+    selection: Option<Selection>,
+    style: ViewStyle,
+) -> EditorRegion {
+    let (width, height) = (area.width as usize, area.height as usize);
+    let cursor = cursor && width > 0 && height > 0;
+    let cursor_row = view.cursor_visual_row(width);
+    let mut top = (scroll as usize).min(view.visual_rows(width).saturating_sub(1));
+    if cursor {
+        if cursor_row < top {
+            top = cursor_row;
+        } else if cursor_row >= top + height {
+            top = cursor_row + 1 - height;
+        }
+    }
+
+    let mut lines = Vec::new();
+    let mut vrow = 0;
+    for (row, line) in view.lines().iter().enumerate() {
+        if vrow >= top + height {
+            break;
+        }
+        let rows = view.wrapped_rows(row, width);
+        if vrow + rows <= top {
+            vrow += rows;
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let key_len = match style {
+            ViewStyle::HeaderKeys => chars.iter().position(|c| *c == ':').unwrap_or(0),
+            ViewStyle::Plain(_) => 0,
+        };
+        let base = |col: usize| match style {
+            ViewStyle::Plain(s) => s,
+            ViewStyle::HeaderKeys if col < key_len => Style::new().fg(Color::Cyan),
+            ViewStyle::HeaderKeys => Style::new(),
+        };
+        let starts = view.wrap_starts(row, width);
+        for (i, start) in starts.iter().enumerate() {
+            if vrow >= top && vrow < top + height {
+                let end = starts.get(i + 1).copied().unwrap_or(chars.len());
+                let segment = chars[*start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(j, c)| (start + j, *c));
+                lines.push(styled_line(segment, row, selection.as_ref(), base));
+            }
+            vrow += 1;
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+
+    if cursor {
+        let x = area.x + view.cursor_visual_col(width) as u16;
+        let y = area.y + (cursor_row - top) as u16;
+        frame.set_cursor_position((x, y));
+    }
+    EditorRegion {
+        area,
+        scroll_x: 0,
+        scroll_y: top.min(u16::MAX as usize) as u16,
+        wrap: true,
     }
 }
 
@@ -472,28 +617,23 @@ fn draw_response(frame: &mut Frame, app: &App, area: Rect) {
                 draw_preview(frame, app, body_area);
                 return;
             }
-            let text: Text = match app.response_tab {
-                ResponseTab::Body => Text::from(r.body.as_str()),
-                ResponseTab::Headers => Text::from(
-                    r.headers
-                        .iter()
-                        .map(|(k, v)| {
-                            Line::from(vec![
-                                Span::raw(k.clone()).fg(Color::Cyan),
-                                Span::raw(": "),
-                                Span::raw(v.clone()),
-                            ])
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-                ResponseTab::Preview => unreachable!(),
+            let Some(view) = app.response_view() else {
+                return;
             };
-            frame.render_widget(
-                Paragraph::new(text)
-                    .wrap(Wrap { trim: false })
-                    .scroll((app.response_scroll, 0)),
+            let style = match app.response_tab {
+                ResponseTab::Headers => ViewStyle::HeaderKeys,
+                _ => ViewStyle::Plain(Style::new()),
+            };
+            let region = draw_view(
+                frame,
+                view,
                 body_area,
+                app.response_scroll,
+                show_cursor(app, Focus::Response),
+                selection(app, Focus::Response),
+                style,
             );
+            app.regions.borrow_mut().response_editor = Some(region);
         }
     }
 }
@@ -554,6 +694,10 @@ fn draw_help(frame: &mut Frame) {
         ("i a I A o O", "Insert モードへ (Esc で Normal)"),
         ("x X r s S D C", "文字削除 / 置換 / 行末まで削除 など"),
         ("d c y + 移動", "dw, cw, d$, dd, cc, yy など"),
+        (
+            "v / V → y",
+            "選択してクリップボードにコピー (cURL / Response でも可)",
+        ),
         ("p / P / u", "貼り付け / 前に貼り付け / 元に戻す"),
         ("Ctrl+D/U/F/B", "レスポンスのページ送り"),
         ("3 (Response)", "HTML のプレビュー (kitty 対応端末)"),
@@ -602,7 +746,7 @@ fn draw_rename(frame: &mut Frame, app: &App) {
         .border_type(BorderType::Thick)
         .border_style(Style::new().fg(Color::Magenta))
         .title(" リクエスト名 ");
-    let _ = draw_editor(frame, &app.rename, blk, area, true, "");
+    let _ = draw_editor(frame, &app.rename, blk, area, true, None, "");
 }
 
 #[cfg(test)]
@@ -973,5 +1117,72 @@ mod tests {
         let app = App::new(vec![]);
         let mut terminal = Terminal::new(TestBackend::new(20, 5)).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
+    }
+
+    #[test]
+    fn visual_selection_is_highlighted_and_cursor_shown_in_response() {
+        let mut app = App::new(vec![]);
+        app.set_response(Ok(Response {
+            status: 200,
+            body: "hello world\nsecond".into(),
+            ..Default::default()
+        }));
+        app.focus = Focus::Response;
+        for c in "wve".chars() {
+            app.handle_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Char(c),
+            ));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let screen = render(&app);
+        assert!(screen.contains("VISUAL"));
+        let (x, y) = find(&screen, "hello world");
+        let reversed = |dx: u16| {
+            terminal.backend().buffer()[(x + dx, y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(!reversed(5));
+        assert!(reversed(6) && reversed(10));
+        assert!(!reversed(11));
+        // カーソルは選択の終端 (world の d)
+        let pos = terminal.get_cursor_position().unwrap();
+        assert_eq!((pos.x, pos.y), (x + 10, y));
+    }
+
+    #[test]
+    fn click_places_cursor_in_wrapped_read_only_views() {
+        let mut app = App::new(vec![]);
+        let long = "x".repeat(200);
+        app.set_response(Ok(Response {
+            status: 200,
+            body: format!("{long}\nshort"),
+            ..Default::default()
+        }));
+        let screen = render(&app);
+        let region = app.regions.borrow().response_editor.unwrap();
+        assert!(region.wrap);
+        let width = region.area.width as usize;
+        // 長い行は折り返され、その下に次の行が続く
+        let (_, y) = find(&screen, "short");
+        assert_eq!(
+            y as usize,
+            region.area.y as usize + 200usize.div_ceil(width)
+        );
+        click(&mut app, region.area.x + 3, region.area.y + 1);
+        assert_eq!(app.focus, Focus::Response);
+        assert_eq!(app.response_body_view.cursor(), (0, width + 3));
+        render(&app);
+        click(&mut app, region.area.x + 2, y);
+        assert_eq!(app.response_body_view.cursor(), (1, 2));
+
+        // cURL タブでもクリックした位置にカーソルが移る
+        app.request_tab = RequestTab::Curl;
+        let (x, y) = find(&render(&app), "'https://httpbin.org/get'");
+        click(&mut app, x + 1, y);
+        assert_eq!(app.focus, Focus::Request);
+        let (row, col) = app.curl_view.cursor();
+        assert_eq!(app.curl_view.lines()[row].chars().nth(col), Some('h'));
     }
 }

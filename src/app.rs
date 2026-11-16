@@ -10,6 +10,7 @@ use crossterm::event::{
 };
 use ratatui::layout::{Position, Rect};
 
+use crate::curl;
 use crate::editor::TextEditor;
 use crate::model::{self, HttpMethod, Request, Response};
 
@@ -234,6 +235,8 @@ pub enum Mode {
     Normal,
     /// フォーカス中のテキスト欄を編集中 (Vim の Insert モード)
     Editing,
+    /// 文字を選択中 (Vim の Visual モード)。`y` でクリップボードにコピーする
+    Visual,
     /// `:` コマンドライン入力中
     Command,
     /// リクエスト名の変更中
@@ -251,6 +254,40 @@ pub enum Action {
     Save(Vec<Request>),
     /// `:wq` 保存してから終了
     SaveAndQuit(Vec<Request>),
+    /// テキストをクリップボードにコピーする
+    Copy(String),
+}
+
+/// Visual モードの選択状態 (選択を始めた位置と、行単位かどうか)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Visual {
+    pub anchor: (usize, usize),
+    pub linewise: bool,
+}
+
+/// 選択範囲。`start` から `end` まで (`end` の文字も含む)。位置は (行, 文字単位の列)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub linewise: bool,
+}
+
+impl Selection {
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        if row < self.start.0 || row > self.end.0 {
+            return false;
+        }
+        self.linewise || ((row, col) >= self.start && (row, col) <= self.end)
+    }
+}
+
+/// 読み取り専用のテキスト (カーソル移動と選択・コピーだけできる)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewId {
+    Curl,
+    ResponseBody,
+    ResponseHeaders,
 }
 
 /// 直近の送信結果。
@@ -268,6 +305,8 @@ pub struct EditorRegion {
     pub area: Rect,
     pub scroll_x: u16,
     pub scroll_y: u16,
+    /// 折り返して表示しているか (読み取り専用ビュー)。`scroll_y` は折り返し後の行数
+    pub wrap: bool,
 }
 
 /// 直近の描画での各ペインの位置。マウスのクリック先を判定するために ui が記録する。
@@ -285,6 +324,8 @@ pub struct Regions {
     pub request_editor: Option<EditorRegion>,
     pub response: Rect,
     pub response_tabs: Vec<Rect>,
+    /// Response の Body / Headers タブの本文部分
+    pub response_editor: Option<EditorRegion>,
 }
 
 /// マウスホイール 1 目盛りでスクロールする行数。
@@ -301,6 +342,14 @@ pub struct App {
     pub headers: TextEditor,
     pub body: TextEditor,
     pub rename: TextEditor,
+    /// cURL タブの表示内容 (読み取り専用)。キー入力のたびにリクエストから作り直す
+    pub curl_view: TextEditor,
+    /// `curl_view` の元になった curl コマンド
+    curl_text: String,
+    pub curl_scroll: u16,
+    /// Response の Body / Headers タブの表示内容 (読み取り専用)
+    pub response_body_view: TextEditor,
+    pub response_headers_view: TextEditor,
     pub focus: Focus,
     /// フォーカス中のペインを全画面表示しているか (Shift+Esc / Ctrl+W z で切り替え)
     pub zoomed: bool,
@@ -330,6 +379,10 @@ pub struct App {
     pub register: Register,
     /// Collection でヤンク (yy / dd) したリクエスト
     pub request_register: Option<Request>,
+    /// Visual モードの選択状態 (`mode` が Visual のときだけ意味を持つ)
+    pub visual: Visual,
+    /// 今回のキー入力でクリップボードにコピーするテキスト
+    clipboard: Option<String>,
     /// Collection から Ctrl+L で戻る先
     last_right_focus: Focus,
 }
@@ -348,6 +401,11 @@ impl App {
             headers: TextEditor::multi_line(""),
             body: TextEditor::multi_line(""),
             rename: TextEditor::single_line(""),
+            curl_view: TextEditor::multi_line(""),
+            curl_text: String::new(),
+            curl_scroll: 0,
+            response_body_view: TextEditor::multi_line(""),
+            response_headers_view: TextEditor::multi_line(""),
             focus: Focus::Url,
             zoomed: false,
             mode: Mode::Normal,
@@ -368,9 +426,12 @@ impl App {
             command: TextEditor::single_line(""),
             register: Register::default(),
             request_register: None,
+            visual: Visual::default(),
+            clipboard: None,
             last_right_focus: Focus::Url,
         };
         app.load_selected();
+        app.sync_curl_view();
         app
     }
 
@@ -437,6 +498,163 @@ impl App {
         }
     }
 
+    /// Response で表示中の読み取り専用ビュー (レスポンスが無いときや Preview タブでは None)。
+    fn response_view_id(&self) -> Option<ViewId> {
+        if !matches!(self.response, ResponseState::Done(_)) {
+            return None;
+        }
+        match self.response_tab {
+            ResponseTab::Body => Some(ViewId::ResponseBody),
+            ResponseTab::Headers => Some(ViewId::ResponseHeaders),
+            ResponseTab::Preview => None,
+        }
+    }
+
+    /// フォーカス中の読み取り専用ビュー。
+    fn focused_view(&self) -> Option<ViewId> {
+        match self.focus {
+            Focus::Request if self.request_tab == RequestTab::Curl => Some(ViewId::Curl),
+            Focus::Response => self.response_view_id(),
+            _ => None,
+        }
+    }
+
+    fn view(&self, id: ViewId) -> &TextEditor {
+        match id {
+            ViewId::Curl => &self.curl_view,
+            ViewId::ResponseBody => &self.response_body_view,
+            ViewId::ResponseHeaders => &self.response_headers_view,
+        }
+    }
+
+    /// ビューと、そのスクロール位置 (折り返し後の行数)。
+    fn view_mut(&mut self, id: ViewId) -> (&mut TextEditor, &mut u16) {
+        match id {
+            ViewId::Curl => (&mut self.curl_view, &mut self.curl_scroll),
+            ViewId::ResponseBody => (&mut self.response_body_view, &mut self.response_scroll),
+            ViewId::ResponseHeaders => (&mut self.response_headers_view, &mut self.response_scroll),
+        }
+    }
+
+    /// Response で表示中のテキスト (描画用)。
+    pub fn response_view(&self) -> Option<&TextEditor> {
+        self.response_view_id().map(|id| self.view(id))
+    }
+
+    /// カーソルを置けるテキスト (編集できる欄と読み取り専用ビュー)。
+    fn active_text(&mut self) -> Option<&mut TextEditor> {
+        match self.focused_view() {
+            Some(id) => Some(self.view_mut(id).0),
+            None => self.active_editor(),
+        }
+    }
+
+    fn active_text_ref(&self) -> Option<&TextEditor> {
+        if let Some(id) = self.focused_view() {
+            return Some(self.view(id));
+        }
+        match self.focus {
+            Focus::Url => Some(&self.url),
+            Focus::Request => match self.request_tab {
+                RequestTab::Params => Some(&self.params),
+                RequestTab::Headers => Some(&self.headers),
+                RequestTab::Body => Some(&self.body),
+                RequestTab::Curl => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Visual モードで選択中の範囲。
+    pub fn selection(&self) -> Option<Selection> {
+        if self.mode != Mode::Visual {
+            return None;
+        }
+        let cursor = self.active_text_ref()?.cursor();
+        let anchor = self.visual.anchor;
+        Some(Selection {
+            start: anchor.min(cursor),
+            end: anchor.max(cursor),
+            linewise: self.visual.linewise,
+        })
+    }
+
+    /// cURL タブの内容を現在のリクエストに合わせる。
+    fn sync_curl_view(&mut self) {
+        let text = curl::to_curl(&self.current_request());
+        if text == self.curl_text {
+            return;
+        }
+        self.curl_view.set_text(&text);
+        self.curl_view.set_cursor(0, 0);
+        self.curl_text = text;
+        self.curl_scroll = 0;
+        if self.mode == Mode::Visual && self.focused_view() == Some(ViewId::Curl) {
+            self.mode = Mode::Normal;
+        }
+    }
+
+    /// 直近の描画でのビューの (幅, 高さ)。まだ描画していなければ幅 0 (折り返さない)。
+    fn view_size(&self, id: ViewId) -> (usize, usize) {
+        let regions = self.regions.borrow();
+        let region = match id {
+            ViewId::Curl => regions.request_editor,
+            ViewId::ResponseBody | ViewId::ResponseHeaders => regions.response_editor,
+        };
+        let (width, height) = region
+            .filter(|r| r.wrap)
+            .map(|r| (r.area.width as usize, r.area.height as usize))
+            .unwrap_or((0, 0));
+        let height = if height == 0 && id != ViewId::Curl {
+            self.response_height.get() as usize
+        } else {
+            height
+        };
+        (width, height.max(1))
+    }
+
+    /// フォーカス中のビューを、カーソルが見える位置までスクロールする。
+    fn follow_cursor(&mut self) {
+        let Some(id) = self.focused_view() else {
+            return;
+        };
+        let (width, height) = self.view_size(id);
+        let (ed, scroll) = self.view_mut(id);
+        let row = ed.cursor_visual_row(width);
+        let top = *scroll as usize;
+        let top = if row < top {
+            row
+        } else if row >= top + height {
+            row + 1 - height
+        } else {
+            top
+        };
+        *scroll = top.min(u16::MAX as usize) as u16;
+    }
+
+    /// ビューをスクロールする。カーソルが画面外に出るなら画面内に引き戻す (Vim と同じ)。
+    fn scroll_view(&mut self, id: ViewId, delta: i32) {
+        let (width, height) = self.view_size(id);
+        let (ed, scroll) = self.view_mut(id);
+        let max = ed
+            .visual_rows(width)
+            .saturating_sub(1)
+            .min(u16::MAX as usize) as i32;
+        let top = (*scroll as i32 + delta).clamp(0, max) as usize;
+        *scroll = top as u16;
+        let row = ed.cursor_visual_row(width);
+        let target = if row < top {
+            top
+        } else if row >= top + height {
+            top + height - 1
+        } else {
+            return;
+        };
+        let (row, col) = ed.pos_at_visual(target, ed.cursor_visual_col(width), width);
+        ed.set_cursor(row, col);
+        ed.clamp_normal();
+    }
+
     pub fn is_loading(&self) -> bool {
         self.response == ResponseState::Loading
     }
@@ -468,6 +686,7 @@ impl App {
         if self.response_tabs().contains(&tab) {
             self.response_tab = tab;
             self.response_scroll = 0;
+            self.follow_cursor();
         }
     }
 
@@ -477,8 +696,27 @@ impl App {
 
     /// 送信結果を反映する。
     pub fn set_response(&mut self, result: Result<Response, String>) {
+        // 選択中のテキストが置き換わるので Visual モードは抜ける
+        if self.mode == Mode::Visual && self.focus == Focus::Response {
+            self.mode = Mode::Normal;
+        }
         self.response_scroll = 0;
         self.reset_preview();
+        let (body, headers) = match &result {
+            Ok(r) => (
+                r.body.as_str(),
+                r.headers
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(_) => ("", String::new()),
+        };
+        self.response_body_view.set_text(body);
+        self.response_body_view.set_cursor(0, 0);
+        self.response_headers_view.set_text(&headers);
+        self.response_headers_view.set_cursor(0, 0);
         match result {
             Ok(r) => {
                 self.status = format!("{} {} ({} ms)", r.status, r.status_text, r.elapsed_ms);
@@ -539,6 +777,7 @@ impl App {
                     Mode::Command => self.command.insert_str(&text),
                     _ => {}
                 }
+                self.sync_curl_view();
                 Action::None
             }
             Event::Mouse(mouse) => {
@@ -556,6 +795,7 @@ impl App {
             MouseEventKind::ScrollUp => self.wheel(mouse.column, mouse.row, -WHEEL_LINES),
             _ => {}
         }
+        self.sync_curl_view();
     }
 
     /// 左クリック: ペイン / リクエスト / タブを選び、テキスト欄ならカーソルを置く。
@@ -566,6 +806,8 @@ impl App {
                 return;
             }
             Mode::Rename | Mode::Command => return,
+            // クリックで選択を解除する
+            Mode::Visual => self.mode = Mode::Normal,
             Mode::Normal | Mode::Editing => {}
         }
         let regions = self.regions.borrow().clone();
@@ -577,7 +819,7 @@ impl App {
         } else if regions.request.contains(pos) {
             (Focus::Request, regions.request_editor)
         } else if regions.response.contains(pos) {
-            (Focus::Response, None)
+            (Focus::Response, regions.response_editor)
         } else {
             return;
         };
@@ -613,11 +855,17 @@ impl App {
 
         if let Some(region) = editor {
             let insert = self.mode == Mode::Editing;
-            if let Some(ed) = self.active_editor() {
-                let row = ((y - region.area.y) as usize + region.scroll_y as usize)
-                    .min(ed.line_count() - 1);
-                let col = (x - region.area.x) as usize + region.scroll_x as usize;
-                ed.set_cursor(row, ed.col_at_display(row, col));
+            if let Some(ed) = self.active_text() {
+                let dx = (x - region.area.x) as usize;
+                let dy = (y - region.area.y) as usize;
+                let (row, col) = if region.wrap {
+                    let width = region.area.width as usize;
+                    ed.pos_at_visual(dy + region.scroll_y as usize, dx, width)
+                } else {
+                    let row = (dy + region.scroll_y as usize).min(ed.line_count() - 1);
+                    (row, ed.col_at_display(row, dx + region.scroll_x as usize))
+                };
+                ed.set_cursor(row, col);
                 if !insert {
                     ed.clamp_normal();
                 }
@@ -625,17 +873,36 @@ impl App {
         }
     }
 
-    /// ホイール: Response の上ならフォーカスに関係なくスクロールする。
+    /// ホイール: Response / cURL タブの上ならフォーカスに関係なくスクロールする。
     fn wheel(&mut self, x: u16, y: u16, delta: i32) {
-        if !matches!(self.mode, Mode::Normal | Mode::Editing) {
+        if !matches!(self.mode, Mode::Normal | Mode::Editing | Mode::Visual) {
             return;
         }
-        if self.regions.borrow().response.contains(Position::new(x, y)) {
+        let pos = Position::new(x, y);
+        let (on_response, on_request) = {
+            let regions = self.regions.borrow();
+            (
+                regions.response.contains(pos),
+                regions.request.contains(pos),
+            )
+        };
+        if on_response {
             self.scroll_response_by(delta);
+        } else if on_request && self.request_tab == RequestTab::Curl {
+            self.scroll_view(ViewId::Curl, delta);
         }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        let action = self.dispatch_key(key);
+        self.sync_curl_view();
+        match (action, self.clipboard.take()) {
+            (Action::None, Some(text)) => Action::Copy(text),
+            (action, _) => action,
+        }
+    }
+
+    fn dispatch_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // どのモードでも有効なショートカット
         if ctrl {
@@ -668,6 +935,10 @@ impl App {
                 self.handle_editing_key(key);
                 Action::None
             }
+            Mode::Visual => {
+                self.handle_visual_key(key);
+                Action::None
+            }
             Mode::Command => self.handle_command_key(key),
             Mode::Normal => self.handle_normal_key(key),
         }
@@ -677,6 +948,9 @@ impl App {
         if self.is_loading() {
             self.status = "送信中です…".to_string();
             return Action::None;
+        }
+        if self.mode == Mode::Visual {
+            self.mode = Mode::Normal;
         }
         self.commit();
         let req = self.current_request();
@@ -744,6 +1018,151 @@ impl App {
                 ed.checkpoint();
             }
             self.mode = Mode::Editing;
+        }
+    }
+
+    /// Visual モードに入る (`v` / `V`)。
+    fn enter_visual(&mut self, linewise: bool) {
+        if let Some(ed) = self.active_text() {
+            let anchor = ed.cursor();
+            self.visual = Visual { anchor, linewise };
+            self.mode = Mode::Visual;
+        }
+    }
+
+    /// Visual モード: カーソル移動で範囲を決め、`y` でコピーする。文字列は変更できない。
+    fn handle_visual_key(&mut self, key: KeyEvent) {
+        let pending = std::mem::take(&mut self.pending);
+        if key.code == KeyCode::Esc || self.active_text().is_none() {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if pending == Pending::G {
+            if key.code == KeyCode::Char('g') {
+                self.goto_top();
+            }
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.handle_scroll_key(key);
+            return;
+        }
+        if let Some(motion) = Motion::from_key(key.code) {
+            self.move_cursor(motion);
+            return;
+        }
+        match key.code {
+            KeyCode::Char('g') => self.pending = Pending::G,
+            KeyCode::Char('v') if self.visual.linewise => self.visual.linewise = false,
+            KeyCode::Char('V') if !self.visual.linewise => self.visual.linewise = true,
+            KeyCode::Char('v' | 'V') => self.mode = Mode::Normal,
+            // 選択の反対側の端にカーソルを移す
+            KeyCode::Char('o') => {
+                let anchor = self.visual.anchor;
+                if let Some(ed) = self.active_text() {
+                    let cursor = ed.cursor();
+                    ed.set_cursor(anchor.0, anchor.1);
+                    ed.clamp_normal();
+                    self.visual.anchor = cursor;
+                }
+                self.follow_cursor();
+            }
+            KeyCode::Char('y') => self.yank_selection(),
+            KeyCode::PageDown => self.scroll_response(self.page_size(false) as i32),
+            KeyCode::PageUp => self.scroll_response(-(self.page_size(false) as i32)),
+            _ => {}
+        }
+    }
+
+    /// 選択範囲をヤンクしてクリップボードにコピーし、Normal モードに戻る。
+    fn yank_selection(&mut self) {
+        let selection = self.selection();
+        self.mode = Mode::Normal;
+        let Some(sel) = selection else {
+            return;
+        };
+        let Some(ed) = self.active_text() else {
+            return;
+        };
+        let text = if sel.linewise {
+            ed.lines_text(sel.start.0, sel.end.0)
+        } else {
+            let end = (sel.end.0, (sel.end.1 + 1).min(ed.line_len(sel.end.0)));
+            ed.text_range(sel.start, end)
+        };
+        ed.set_cursor(sel.start.0, sel.start.1);
+        ed.clamp_normal();
+        self.register = Register {
+            text,
+            linewise: sel.linewise,
+        };
+        self.follow_cursor();
+        self.copy_register();
+    }
+
+    /// ヤンクした内容をクリップボードにコピーする (実際の書き込みは main が行う)。
+    fn copy_register(&mut self) {
+        let text = &self.register.text;
+        if text.is_empty() {
+            self.status = "コピーする文字がありません".to_string();
+            return;
+        }
+        self.status = if self.register.linewise {
+            format!(
+                "{} 行をクリップボードにコピーしました",
+                text.split('\n').count()
+            )
+        } else {
+            format!(
+                "{} 文字をクリップボードにコピーしました",
+                text.chars().count()
+            )
+        };
+        self.clipboard = Some(text.clone());
+    }
+
+    /// カーソルを動かす (読み取り専用ビューではスクロールも合わせる)。
+    fn move_cursor(&mut self, motion: Motion) {
+        if let Some(ed) = self.active_text() {
+            apply_motion(ed, motion);
+        }
+        self.follow_cursor();
+    }
+
+    /// 読み取り専用ビュー (cURL / Response) での Normal モード操作。
+    /// 移動と選択・ヤンクだけを受け付け、文字列を変えるキーは無視する。
+    fn handle_view_normal_key(&mut self, key: KeyEvent) {
+        if let Some(motion) = Motion::from_key(key.code) {
+            self.move_cursor(motion);
+            return;
+        }
+        match key.code {
+            KeyCode::Char('v') => self.enter_visual(false),
+            KeyCode::Char('V') => self.enter_visual(true),
+            KeyCode::Char('y') => self.pending = Pending::Op(Operator::Yank),
+            KeyCode::Char('Y') => self.operate_lines(Operator::Yank, None),
+            _ => {}
+        }
+    }
+
+    /// オペレータの対象。ヤンクは読み取り専用ビューでもできる。
+    fn operand(&mut self, op: Operator) -> Option<&mut TextEditor> {
+        match op {
+            Operator::Yank => self.active_text(),
+            Operator::Delete | Operator::Change => self.active_editor(),
+        }
+    }
+
+    /// Ctrl+D / U / F / B / E / Y (Response のスクロール)。
+    fn handle_scroll_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('d') => self.scroll_response(self.page_size(true) as i32),
+            KeyCode::Char('u') => self.scroll_response(-(self.page_size(true) as i32)),
+            KeyCode::Char('f') => self.scroll_response(self.page_size(false) as i32),
+            KeyCode::Char('b') => self.scroll_response(-(self.page_size(false) as i32)),
+            KeyCode::Char('e') => self.scroll_response(1),
+            KeyCode::Char('y') => self.scroll_response(-1),
+            _ => {}
         }
     }
 
@@ -886,13 +1305,7 @@ impl App {
             match key.code {
                 KeyCode::Char(c @ ('h' | 'j' | 'k' | 'l')) => self.move_focus(c),
                 KeyCode::Char('w') => self.pending = Pending::Window,
-                KeyCode::Char('d') => self.scroll_response(self.page_size(true) as i32),
-                KeyCode::Char('u') => self.scroll_response(-(self.page_size(true) as i32)),
-                KeyCode::Char('f') => self.scroll_response(self.page_size(false) as i32),
-                KeyCode::Char('b') => self.scroll_response(-(self.page_size(false) as i32)),
-                KeyCode::Char('e') => self.scroll_response(1),
-                KeyCode::Char('y') => self.scroll_response(-1),
-                _ => {}
+                _ => self.handle_scroll_key(key),
             }
             return Action::None;
         }
@@ -936,13 +1349,15 @@ impl App {
     fn goto_top(&mut self) {
         match self.focus {
             Focus::Collection => self.select(0),
-            Focus::Response => self.response_scroll = 0,
             _ => {
-                if let Some(ed) = self.active_editor() {
+                if let Some(ed) = self.active_text() {
                     ed.set_cursor(0, 0);
                     let col = ed.first_non_blank_col(0);
                     ed.set_cursor(0, col);
                     ed.clamp_normal();
+                    self.follow_cursor();
+                } else if self.focus == Focus::Response {
+                    self.response_scroll = 0;
                 }
             }
         }
@@ -955,6 +1370,10 @@ impl App {
     }
 
     fn scroll_response_by(&mut self, delta: i32) {
+        if let Some(id) = self.response_view_id() {
+            self.scroll_view(id, delta);
+            return;
+        }
         let next = (self.response_scroll as i32 + delta).clamp(0, self.max_scroll() as i32);
         self.response_scroll = next as u16;
     }
@@ -1044,7 +1463,8 @@ impl App {
 
     /// テキスト欄 (URL / Params / Headers / Body) での Normal モード操作。
     fn handle_editor_normal_key(&mut self, key: KeyEvent) {
-        if self.focus == Focus::Request && self.request_tab == RequestTab::Curl {
+        if self.focused_view().is_some() {
+            self.handle_view_normal_key(key);
             return;
         }
         if let Some(motion) = Motion::from_key(key.code) {
@@ -1140,11 +1560,11 @@ impl App {
                 return;
             }
             KeyCode::Char('Y') => {
-                let row = ed.cursor().0;
-                self.register = Register {
-                    text: ed.lines_text(row, row),
-                    linewise: true,
-                };
+                self.operate_lines(Operator::Yank, None);
+                return;
+            }
+            KeyCode::Char(c @ ('v' | 'V')) => {
+                self.enter_visual(c == 'V');
                 return;
             }
             KeyCode::Char('p') | KeyCode::Char('P') => {
@@ -1227,7 +1647,7 @@ impl App {
     /// 行単位の操作 (dd / cc / yy、または j / k / gg / G と組み合わせたとき)。
     /// `to` が None なら現在行のみ。
     fn operate_lines(&mut self, op: Operator, to: Option<usize>) {
-        let Some(ed) = self.active_editor() else {
+        let Some(ed) = self.operand(op) else {
             return;
         };
         let row = ed.cursor().0;
@@ -1259,16 +1679,19 @@ impl App {
             text: register,
             linewise: true,
         };
-        if op == Operator::Change {
-            self.enter_insert(false);
-        } else {
-            self.commit();
+        match op {
+            Operator::Change => self.enter_insert(false),
+            Operator::Delete => self.commit(),
+            Operator::Yank => {
+                self.follow_cursor();
+                self.copy_register();
+            }
         }
     }
 
     /// オペレータ + モーション (dw / c$ / ye など)。
     fn operate(&mut self, op: Operator, motion: Motion) {
-        let Some(ed) = self.active_editor() else {
+        let Some(ed) = self.operand(op) else {
             return;
         };
         if motion.linewise() {
@@ -1324,11 +1747,18 @@ impl App {
         };
         match op {
             Operator::Change => self.enter_insert(false),
-            _ => {
+            Operator::Delete => {
                 if let Some(ed) = self.active_editor() {
                     ed.clamp_normal();
                 }
                 self.commit();
+            }
+            Operator::Yank => {
+                if let Some(ed) = self.active_text() {
+                    ed.clamp_normal();
+                }
+                self.follow_cursor();
+                self.copy_register();
             }
         }
     }
@@ -1350,33 +1780,36 @@ impl App {
             return;
         }
         match key.code {
+            KeyCode::PageDown => return self.scroll_response(self.page_size(false) as i32),
+            KeyCode::PageUp => return self.scroll_response(-(self.page_size(false) as i32)),
+            _ => {}
+        }
+        // Body / Headers タブ: カーソル移動と選択・コピー
+        if self.focused_view().is_some() {
+            if key.code == KeyCode::Enter {
+                self.move_cursor(Motion::Down);
+            } else {
+                self.handle_view_normal_key(key);
+            }
+            return;
+        }
+        match key.code {
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Enter => self.scroll_response(1),
             KeyCode::Up | KeyCode::Char('k') => self.scroll_response(-1),
-            KeyCode::PageDown => self.scroll_response(self.page_size(false) as i32),
-            KeyCode::PageUp => self.scroll_response(-(self.page_size(false) as i32)),
             KeyCode::Home => self.response_scroll = 0,
             KeyCode::Char('G') | KeyCode::End => self.response_scroll = self.max_scroll(),
             _ => {}
         }
     }
 
-    /// 現在のレスポンスタブで表示する行数 - 1。
+    /// Preview タブでスクロールできる行数 (画像は最後まで表示したところで止める)。
     fn max_scroll(&self) -> u16 {
-        let lines = match &self.response {
-            ResponseState::Done(r) => match self.response_tab {
-                ResponseTab::Body => r.body.lines().count(),
-                ResponseTab::Headers => r.headers.len(),
-                // 画像は最後まで表示したところで止める
-                ResponseTab::Preview => match self.preview {
-                    PreviewState::Ready { rows, .. } => {
-                        return rows.saturating_sub(self.response_height.get());
-                    }
-                    _ => 0,
-                },
-            },
+        match (&self.response, self.response_tab, &self.preview) {
+            (ResponseState::Done(_), ResponseTab::Preview, PreviewState::Ready { rows, .. }) => {
+                rows.saturating_sub(self.response_height.get())
+            }
             _ => 0,
-        };
-        lines.saturating_sub(1).min(u16::MAX as usize) as u16
+        }
     }
 }
 
@@ -2036,5 +2469,164 @@ mod tests {
         type_str(&mut app, "d");
         assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Action::None);
         assert_eq!(app.url.text(), "https://httpbin.org/get");
+    }
+
+    fn copied(action: Action) -> String {
+        match action {
+            Action::Copy(text) => text,
+            other => panic!("Copy ではない: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn visual_yank_in_response_copies_to_clipboard() {
+        let mut app = App::new(vec![]);
+        app.set_response(Ok(sample_response("hello world\nsecond line")));
+        app.focus = Focus::Response;
+        assert_eq!(app.response_body_view.cursor(), (0, 0));
+
+        // 文字単位: w で world の先頭、v e で world を選択
+        type_str(&mut app, "wve");
+        assert_eq!(app.mode, Mode::Visual);
+        let sel = app.selection().unwrap();
+        assert_eq!((sel.start, sel.end, sel.linewise), ((0, 6), (0, 10), false));
+        assert!(sel.contains(0, 6) && sel.contains(0, 10) && !sel.contains(0, 5));
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(copied(action), "world");
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.response_body_view.cursor(), (0, 6));
+        assert!(app.status.contains("5 文字"));
+
+        // 行単位: V j で 2 行
+        type_str(&mut app, "Vj");
+        assert!(app.selection().unwrap().linewise);
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(copied(action), "hello world\nsecond line");
+
+        // 行をまたぐ文字単位の選択と、o で反対側の端へ
+        type_str(&mut app, "ggwvj0o");
+        assert_eq!(app.response_body_view.cursor(), (0, 6));
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(copied(action), "world\ns");
+
+        // Esc や v で選択を解除できる
+        type_str(&mut app, "v");
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Normal);
+        type_str(&mut app, "vv");
+        assert_eq!(app.mode, Mode::Normal);
+        type_str(&mut app, "vV");
+        assert!(app.selection().unwrap().linewise);
+        type_str(&mut app, "V");
+        assert_eq!(app.mode, Mode::Normal);
+
+        // Headers タブ: yy / yw などのヤンクもクリップボードに入る
+        app.handle_key(key(KeyCode::Char('L')));
+        type_str(&mut app, "y");
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(copied(action), "content-type: application/json");
+        type_str(&mut app, "y");
+        let action = app.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(copied(action), "content");
+    }
+
+    #[test]
+    fn read_only_views_cannot_be_modified() {
+        let mut app = App::new(vec![]);
+        app.set_response(Ok(sample_response("hello world\nsecond line")));
+        let curl = app.curl_view.text();
+        assert!(curl.contains("'https://httpbin.org/get'"));
+
+        for (focus, tab) in [
+            (Focus::Response, '1'),
+            (Focus::Response, '2'),
+            (Focus::Request, '4'),
+        ] {
+            app.focus = focus;
+            app.handle_key(key(KeyCode::Char(tab)));
+            // Normal モードの編集キー、Visual モード中の編集キーのどちらも効かない
+            for keys in [
+                "x", "X", "dd", "dw", "D", "cc", "cw", "C", "s", "S", "rZ", "p", "P",
+            ] {
+                type_str(&mut app, keys);
+                assert_eq!(app.mode, Mode::Normal, "{keys}");
+            }
+            for keys in ["i", "a", "I", "A", "o", "O"] {
+                type_str(&mut app, keys);
+                type_str(&mut app, "zz");
+                assert_eq!(app.mode, Mode::Normal, "{keys}");
+            }
+            for keys in ["x", "d", "c", "s", "rZ", "p", "i", "A", "J"] {
+                type_str(&mut app, "v");
+                type_str(&mut app, keys);
+                assert_eq!(app.mode, Mode::Visual, "{keys}");
+                app.handle_key(key(KeyCode::Esc));
+            }
+            app.handle_event(Event::Paste("pasted".into()));
+            assert_eq!(app.response_body_view.text(), "hello world\nsecond line");
+            assert_eq!(
+                app.response_headers_view.text(),
+                "content-type: application/json"
+            );
+            assert_eq!(app.curl_view.text(), curl);
+        }
+        assert_eq!(app.url.text(), "https://httpbin.org/get");
+        assert_eq!(app.body.text(), "");
+    }
+
+    #[test]
+    fn curl_tab_selects_and_copies_whole_command() {
+        let mut app = App::new(vec![Request {
+            url: "http://a".into(),
+            headers: vec![KeyValue::new("X", "1")],
+            ..Default::default()
+        }]);
+        app.focus = Focus::Request;
+        app.handle_key(key(KeyCode::Char('4')));
+        let curl = curl::to_curl(&app.current_request());
+        assert!(curl.lines().count() > 1);
+        type_str(&mut app, "ggVG");
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(copied(action), curl);
+
+        // リクエストが変わると表示も追従し、カーソルは先頭に戻る
+        type_str(&mut app, "G");
+        app.handle_key(key(KeyCode::Char('m')));
+        assert!(app.curl_view.text().contains("-X POST"));
+        assert_eq!(app.curl_view.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn visual_yank_in_editable_field_keeps_text() {
+        let mut app = App::new(vec![]);
+        type_str(&mut app, "0vllll");
+        // Visual モードでは削除や挿入はできない
+        type_str(&mut app, "xdci");
+        assert_eq!(app.mode, Mode::Visual);
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(copied(action), "https");
+        assert_eq!(app.url.text(), "https://httpbin.org/get");
+        assert_eq!(app.register.text, "https");
+        // Normal モードの yw もコピーする (dw はコピーしない)
+        type_str(&mut app, "y");
+        assert_eq!(copied(app.handle_key(key(KeyCode::Char('w')))), "https");
+        type_str(&mut app, "d");
+        assert_eq!(app.handle_key(key(KeyCode::Char('w'))), Action::None);
+    }
+
+    #[test]
+    fn visual_mode_ends_when_response_is_replaced() {
+        let mut app = App::new(vec![]);
+        app.set_response(Ok(sample_response("abc")));
+        app.focus = Focus::Response;
+        type_str(&mut app, "v");
+        assert_eq!(app.mode, Mode::Visual);
+        app.set_response(Ok(sample_response("xyz")));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.selection(), None);
+        // レスポンスが無いときは Visual モードに入れない
+        app.set_response(Err("boom".into()));
+        type_str(&mut app, "v");
+        assert_eq!(app.mode, Mode::Normal);
     }
 }

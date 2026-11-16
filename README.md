@@ -14,6 +14,7 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 - レスポンスのステータス・所要時間・サイズ・ヘッダ表示、JSON の自動整形
 - HTML レスポンスのプレビュー (Preview タブ。ヘッドレス Chromium で描画し、kitty graphics protocol で端末に表示)
 - リクエストに対応する curl コマンドの表示 (cURL タブ、bash / zsh / sh 向け)
+- Visual モードでの文字選択とクリップボードへのコピー (`v` / `V` → `y`。cURL タブやレスポンスの Body / Headers でも可)
 - コレクション管理 (新規 / 複製 / 削除 / 名前変更) と JSON ファイルへの保存
 - マウス操作 (クリックでペイン / リクエスト / タブ / カーソル位置を選択、ホイールでスクロール)
 - ブラケットペースト対応、日本語などの全角文字の入力に対応
@@ -76,8 +77,8 @@ Normal はブロックカーソル、Insert はバーカーソルで表示され
 | ペインをクリック | そのペインにフォーカス |
 | Collection のリクエストをクリック | リクエストを選択 |
 | タブ (Params / Headers / Body / cURL、Body / Headers / Preview) をクリック | タブ切り替え |
-| テキスト欄 (URL / Params / Headers / Body) をクリック | クリックした位置にカーソルを移動 |
-| Response 上でホイール | スクロール |
+| テキスト欄 (URL / Params / Headers / Body / cURL、Response の Body / Headers) をクリック | クリックした位置にカーソルを移動 |
+| Response / cURL タブ上でホイール | スクロール |
 
 マウス操作を受け取るため、端末の文字選択 (コピー) は `Shift` を押しながらドラッグしてください
 (端末によっては `Option` / `Alt`)。
@@ -98,9 +99,30 @@ Collection から `Ctrl+L` で戻ると、直前にいた右側のペインに�
 | `x` `X` `s` `S` `D` `C` `r{文字}` | 1 文字削除 / 置換 / 行末まで削除 など |
 | `d` `c` `y` + モーション | `dw` `cw` `d$` `dj` `dgg` `dd` `cc` `yy` など |
 | `p` / `P`, `Y` | 貼り付け (後 / 前)、行ヤンク |
+| `v` / `V` | Visual モード (文字単位 / 行単位) で選択。`y` でクリップボードにコピー |
 | `u` | 元に戻す (Insert 1 回分をまとめて戻す) |
 | `Ctrl+W` / `Ctrl+H` (Insert 中) | 直前の単語 / 1 文字を削除 |
 | `Ctrl+A` / `Ctrl+E` / `Ctrl+K` / `Ctrl+U` (Insert 中) | 行頭 / 行末 / 行末まで削除 / 全消去 |
+
+#### 選択とコピー (Visual モード)
+
+URL / Params / Headers / Body に加えて、編集できない cURL タブと Response の Body / Headers タブでも使えます。
+
+| キー | 動作 |
+| --- | --- |
+| `v` / `V` | 文字単位 / 行単位の選択を始める (もう一度押すと解除、`v` ⇔ `V` で切り替え) |
+| `h` `j` `k` `l`, `w` `b` `e`, `0` `^` `$`, `gg` `G` | 選択範囲を伸縮 |
+| `o` | 選択範囲の反対側の端へカーソルを移す |
+| `y` | 選択範囲をクリップボードにコピーして Normal に戻る |
+| `Esc` | 選択を解除 |
+
+- Visual モードでは文字列を変更できません (`x` `d` `c` などは無視されます)。
+- Normal モードの `yy` `yw` `y$` `Y` などのヤンクもクリップボードにコピーされます (`d` / `x` での削除はコピーされません)。
+- cURL タブと Response の Body / Headers タブは読み取り専用です。カーソル移動・選択・ヤンクだけができ、
+  `x` `r` `i` `p` などの文字列を変えるキーは無視されます。
+- コピーは OS のコピーコマンド (macOS: `pbcopy`、Wayland: `wl-copy`、X11: `xclip` / `xsel`) と、
+  端末への OSC 52 エスケープシーケンスの両方で行います。SSH 越しや Windows では OSC 52 に対応した端末
+  (kitty / Ghostty / WezTerm / iTerm2 / Windows Terminal など) が必要です。tmux では `set -g set-clipboard on` にしてください。
 
 #### Collection / Response
 
@@ -110,9 +132,11 @@ Collection から `Ctrl+L` で戻ると、直前にいた右側のペインに�
 | `o` (`n`) / `O` | (Collection) 下 / 上に新規作成 |
 | `yy` / `dd` / `p` / `P` | (Collection) ヤンク / 削除 / 貼り付け (`yyp` で複製) |
 | `r`, `Enter` / `l` | (Collection) 名前変更、URL ペインへ |
-| `j` / `k`, `Ctrl+E` / `Ctrl+Y` | (Response) 1 行スクロール |
+| `h` `j` `k` `l`, `w` `b` `e`, `0` `^` `$`, `gg` `G` | (Response の Body / Headers) カーソル移動 (画面端でスクロール) |
+| `v` / `V` → `y`, `yy` など | (Response の Body / Headers) 選択 / クリップボードにコピー |
+| `Ctrl+E` / `Ctrl+Y` | (Response) 1 行スクロール |
 | `Ctrl+D` / `Ctrl+U`, `Ctrl+F` / `Ctrl+B` | (Response) 半ページ / 1 ページ送り |
-| `gg` / `G` | (Response) 先頭 / 末尾 |
+| `j` / `k`, `gg` / `G` | (Preview タブ) スクロール、先頭 / 末尾 |
 | `1` / `2` / `3`, `H` / `L` | (Response) Body / Headers / Preview タブ (Preview は HTML のときだけ) |
 | `+` / `-` / `0` | (Preview タブ) 拡大 / 縮小 / 倍率リセット |
 
@@ -151,6 +175,8 @@ Preview タブを開くと、ヘッドレス Chromium で HTML を Response ペ�
 出力は bash / zsh / sh 向けです。値は `'…'` で囲み、中の `'` は `'\''` に置き換えています。
 fish・PowerShell・コマンドプロンプトはクォートの規則が違うため、そのまま貼ると正しく動かないことがあります。
 
+コマンド全体をコピーするには、cURL タブで `ggVGy` と入力します。
+
 ## 構成
 
 ```
@@ -159,6 +185,7 @@ src/
 ├── app.rs         # アプリ状態と Vim 風キー処理 (I/O を持たない状態機械)
 ├── ui.rs          # Ratatui による描画
 ├── editor.rs      # 単一行 / 複数行テキストエディタ (単語移動・範囲削除・undo)
+├── clipboard.rs   # クリップボードへのコピー (コピーコマンド / OSC 52)
 ├── curl.rs        # curl コマンド生成 (bash / zsh / sh 向け)
 ├── model.rs       # Request / Response / ヘッダ・パラメータのパース、curl 生成
 ├── http.rs        # reqwest による送信、JSON 整形
