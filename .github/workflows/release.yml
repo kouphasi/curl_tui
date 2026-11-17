@@ -1,6 +1,6 @@
 name: Release
 
-# バージョン番号のタグ (例: 0.2.0。先頭に v は付けない) を push すると、
+# バージョン番号のタグ (例: 0.2.1。先頭に v は付けない) を push すると、
 # 各 OS 向けのバイナリをビルドして GitHub Releases に添付する。
 on:
   push:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "リリースするタグ (例: 0.2.0)。既存のタグを指定する"
+        description: "リリースするタグ (例: 0.2.1)。既存のタグを指定する"
         required: true
 
 permissions:
