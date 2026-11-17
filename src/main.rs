@@ -79,9 +79,20 @@ async fn main() -> Result<()> {
         app.set_preview_zoom(zoom);
         app.status.clear();
     }
-    let loaded_ok = loaded.is_ok();
+    let vimrc_error = vimrc::load(&vimrc_path)
+        .map(|vimrc| app.set_vimrc(vimrc))
+        .err();
     match loaded {
-        Ok(config) => app.set_keymap(config.keymap),
+        Ok(config) => {
+            app.set_keymap(config.keymap);
+            if let Some(e) = vimrc_error {
+                app.status = tf!(
+                    "vimrc error (starting without mappings): {e:#}",
+                    "vimrc のエラー (マッピングなしで起動): {e:#}"
+                )
+            }
+        }
+        // config.jsonc のエラーがあれば、vimrc のエラーよりそちらを表示する
         // 設定が壊れていても既定のキーで起動する
         Err(e) => {
             app.status = tf!(
@@ -89,17 +100,6 @@ async fn main() -> Result<()> {
                 "設定エラー (既定のキーで起動): {e:#}"
             )
         }
-    }
-    match vimrc::load(&vimrc_path) {
-        Ok(vimrc) => app.set_vimrc(vimrc),
-        // config.jsonc のエラーがあればそちらを表示したままにする
-        Err(e) if loaded_ok => {
-            app.status = tf!(
-                "vimrc error (starting without mappings): {e:#}",
-                "vimrc のエラー (マッピングなしで起動): {e:#}"
-            )
-        }
-        Err(_) => {}
     }
     let browser = preview::find_browser();
     app.preview_unavailable = preview_unavailable(browser.as_deref());
@@ -200,6 +200,44 @@ enum EditTarget {
     Vimrc,
 }
 
+/// config.jsonc を読み直して反映する。戻り値はステータス行に出す文言。
+fn reload_config(app: &mut App, path: &Path) -> String {
+    match load_config(path) {
+        Ok(config) => {
+            let count = config.keymap.user_count();
+            app.set_keymap(config.keymap);
+            tf!(
+                "Config applied ({count} key bindings): {p}",
+                "設定を反映しました (キーバインド {count} 件): {p}",
+                p = path.display()
+            )
+        }
+        Err(e) => tf!(
+            "Config error (not applied): {e:#}",
+            "設定エラー (未反映): {e:#}"
+        ),
+    }
+}
+
+/// vimrc を読み直して反映する。戻り値はステータス行に出す文言。
+fn reload_vimrc(app: &mut App, path: &Path) -> String {
+    match vimrc::load(path) {
+        Ok(vimrc) => {
+            let count = vimrc.maps.len();
+            app.set_vimrc(vimrc);
+            tf!(
+                "vimrc applied ({count} mappings): {p}",
+                "vimrc を反映しました (マッピング {count} 件): {p}",
+                p = path.display()
+            )
+        }
+        Err(e) => tf!(
+            "vimrc error (not applied): {e:#}",
+            "vimrc のエラー (未反映): {e:#}"
+        ),
+    }
+}
+
 /// TUI を一時的に抜けて設定ファイルをエディタで開き、閉じたら読み直す。
 fn edit_config(
     terminal: &mut DefaultTerminal,
@@ -236,36 +274,8 @@ fn edit_config(
             "エディタ `{program}` を起動できません ($EDITOR を確認してください): {e}"
         ),
         Ok(_) => match target {
-            EditTarget::Config => match load_config(path) {
-                Ok(config) => {
-                    let count = config.keymap.user_count();
-                    app.set_keymap(config.keymap);
-                    tf!(
-                        "Config applied ({count} key bindings): {p}",
-                        "設定を反映しました (キーバインド {count} 件): {p}",
-                        p = path.display()
-                    )
-                }
-                Err(e) => tf!(
-                    "Config error (not applied): {e:#}",
-                    "設定エラー (未反映): {e:#}"
-                ),
-            },
-            EditTarget::Vimrc => match vimrc::load(path) {
-                Ok(vimrc) => {
-                    let count = vimrc.maps.len();
-                    app.set_vimrc(vimrc);
-                    tf!(
-                        "vimrc applied ({count} mappings): {p}",
-                        "vimrc を反映しました (マッピング {count} 件): {p}",
-                        p = path.display()
-                    )
-                }
-                Err(e) => tf!(
-                    "vimrc error (not applied): {e:#}",
-                    "vimrc のエラー (未反映): {e:#}"
-                ),
-            },
+            EditTarget::Config => reload_config(app, path),
+            EditTarget::Vimrc => reload_vimrc(app, path),
         },
     };
     // 言語が変わったかもしれないので、表示済みの文言を作り直す
@@ -389,8 +399,7 @@ async fn run(
                     }
                 }
             }
-            // エディタを開くときは残りのキーを捨てる (設定を読み直すため)
-            if open_config.is_some() || !app.has_queued_keys() {
+            if !app.has_queued_keys() {
                 break;
             }
             action = app.resume_keys();

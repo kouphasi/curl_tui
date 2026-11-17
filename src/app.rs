@@ -939,6 +939,10 @@ impl App {
     /// Vim 形式のマッピング (設定ファイルの "vimrc") を設定する。
     pub fn set_vimrc(&mut self, vimrc: Vimrc) {
         self.vimrc = vimrc;
+        self.clear_typeahead();
+    }
+
+    fn clear_typeahead(&mut self) {
         self.typeahead.clear();
         self.waiting_since = None;
     }
@@ -986,13 +990,9 @@ impl App {
     fn run_typeahead(&mut self, flush: bool) -> Action {
         let mut depth = 0;
         loop {
-            if self.typeahead.is_empty() {
-                self.waiting_since = None;
-                return Action::None;
-            }
-            if let Some(mode) = self.map_mode()
+            if self.typeahead.front().is_some_and(|q| q.remap)
                 && !self.vimrc.is_empty()
-                && self.typeahead[0].remap
+                && let Some(mode) = self.map_mode()
             {
                 let seq: Vec<KeyStroke> = self
                     .typeahead
@@ -1013,8 +1013,7 @@ impl App {
                 if let Some(m) = found.exact {
                     depth += 1;
                     if depth > MAX_MAP_DEPTH {
-                        self.typeahead.clear();
-                        self.waiting_since = None;
+                        self.clear_typeahead();
                         self.status = t!(
                             "Recursive mapping (check :vimrc; use noremap)",
                             "マッピングが再帰しています (:vimrc を確認してください。noremap を使えます)"
@@ -1034,16 +1033,20 @@ impl App {
                     continue;
                 }
             }
-            let Some(q) = self.typeahead.pop_front() else {
-                continue;
-            };
             self.waiting_since = None;
+            let Some(q) = self.typeahead.pop_front() else {
+                return Action::None;
+            };
             let action = self.process_key(q.event);
             self.sync_curl_view();
             let action = match (action, self.clipboard.take()) {
                 (Action::None, Some(text)) => Action::Copy(text),
                 (action, _) => action,
             };
+            if matches!(action, Action::EditConfig | Action::EditVimrc) {
+                // エディタを開くときは残りのキーを捨てる (設定を読み直すため)
+                self.clear_typeahead();
+            }
             if action != Action::None {
                 return action;
             }

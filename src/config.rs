@@ -188,11 +188,7 @@ fn find_marker(text: &str, markers: [&str; 2]) -> Option<(usize, usize)> {
 /// エディタで開く前の準備。ファイルが無ければ雛形を作り、あればリファレンスの
 /// コメント部分だけを最新の内容に更新する (目印の行が無ければ何も変えない)。
 pub fn prepare(path: &Path) -> anyhow::Result<()> {
-    let current = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e).with_context(|| cannot_read(path)),
-    };
+    let current = read_or_empty(path)?;
     let updated = if current.trim().is_empty() {
         template()
     } else {
@@ -201,6 +197,20 @@ pub fn prepare(path: &Path) -> anyhow::Result<()> {
     if updated == current {
         return Ok(());
     }
+    write_creating_dirs(path, &updated)
+}
+
+/// ファイルを読む。無ければ空文字列。
+pub(crate) fn read_or_empty(path: &Path) -> anyhow::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e).with_context(|| cannot_read(path)),
+    }
+}
+
+/// 親ディレクトリが無ければ作ってから書き込む。
+pub(crate) fn write_creating_dirs(path: &Path, contents: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -212,7 +222,7 @@ pub fn prepare(path: &Path) -> anyhow::Result<()> {
             )
         })?;
     }
-    std::fs::write(path, updated).with_context(|| {
+    std::fs::write(path, contents).with_context(|| {
         tf!(
             "cannot write to {p}",
             "{p} に書き込めません",
