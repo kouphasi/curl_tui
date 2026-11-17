@@ -1,15 +1,15 @@
 name: Release
 
-# v で始まるタグ (例: v0.1.0) を push すると、各 OS 向けのバイナリをビルドして
-# GitHub Releases に添付する。
+# バージョン番号のタグ (例: 0.2.0。先頭に v は付けない) を push すると、
+# 各 OS 向けのバイナリをビルドして GitHub Releases に添付する。
 on:
   push:
     tags:
-      - "v*"
+      - "[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       tag:
-        description: "リリースするタグ (例: v0.1.0)。既存のタグを指定する"
+        description: "リリースするタグ (例: 0.2.0)。既存のタグを指定する"
         required: true
 
 permissions:
