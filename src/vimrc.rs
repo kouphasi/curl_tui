@@ -7,10 +7,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::keymap::KeyStroke;
+use crate::keymap::{KeyStroke, named_key, upper};
 use crate::{t, tf};
 
 /// マッピングが有効になるモード (Vim の map モード)。
@@ -31,11 +31,11 @@ pub enum MapMode {
 impl MapMode {
     fn bit(self) -> u8 {
         match self {
-            MapMode::Normal => 1,
-            MapMode::Visual => 2,
-            MapMode::OperatorPending => 4,
-            MapMode::Insert => 8,
-            MapMode::CmdLine => 16,
+            MapMode::Normal => N,
+            MapMode::Visual => V,
+            MapMode::OperatorPending => O,
+            MapMode::Insert => I,
+            MapMode::CmdLine => C,
         }
     }
 }
@@ -111,54 +111,17 @@ pub fn default_path() -> PathBuf {
 
 /// vimrc ファイルを読む。ファイルが無ければマッピングなし。
 pub fn load(path: &Path) -> anyhow::Result<Vimrc> {
-    if !path.exists() {
-        return Ok(Vimrc::default());
-    }
-    let text = std::fs::read_to_string(path).with_context(|| {
-        tf!(
-            "cannot read {p}",
-            "{p} を読み込めません",
-            p = path.display()
-        )
-    })?;
+    let text = crate::config::read_or_empty(path)?;
     let lines: Vec<&str> = text.lines().collect();
     parse(&lines).map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
 /// エディタで開く前の準備。ファイルが無い (空の) ときだけ雛形を作る。
 pub fn prepare(path: &Path) -> anyhow::Result<()> {
-    match std::fs::read_to_string(path) {
-        Ok(text) if !text.trim().is_empty() => return Ok(()),
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(e).with_context(|| {
-                tf!(
-                    "cannot read {p}",
-                    "{p} を読み込めません",
-                    p = path.display()
-                )
-            });
-        }
+    if !crate::config::read_or_empty(path)?.trim().is_empty() {
+        return Ok(());
     }
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).with_context(|| {
-            tf!(
-                "cannot create {p}",
-                "{p} を作成できません",
-                p = parent.display()
-            )
-        })?;
-    }
-    std::fs::write(path, template()).with_context(|| {
-        tf!(
-            "cannot write to {p}",
-            "{p} に書き込めません",
-            p = path.display()
-        )
-    })
+    crate::config::write_creating_dirs(path, &template())
 }
 
 /// 新しく作る vimrc の内容 (現在の表示言語で書く)。すべてコメントなので何も変えない。
@@ -340,29 +303,33 @@ fn parse_line(line: &str, vimrc: &mut Vimrc, leaders: &mut Leaders) -> Result<()
         return parse_map(rest, *modes, *noremap, vimrc, leaders);
     }
     if let Some((_, modes)) = UNMAP_COMMANDS.iter().find(|(n, _)| n.contains(&command)) {
-        let (rest, _) = map_arguments(rest)?;
-        let (lhs, extra) = split_word(rest);
-        if lhs.is_empty() || !extra.is_empty() {
-            return Err(t!(
-                "write it as `unmap {lhs}`",
-                "`unmap {lhs}` の形で書いてください"
-            )
-            .to_string());
-        }
-        let lhs = parse_notation(lhs, leaders)?;
-        if !vimrc.remove(*modes, &lhs) {
-            return Err(t!(
-                "no such mapping (to disable a built-in key, map it to <Nop>, e.g. `nnoremap q <Nop>`)",
-                "そのマッピングはありません (既定のキーを無効にするには `nnoremap q <Nop>` のように <Nop> に割り当ててください)"
-            )
-            .to_string());
-        }
-        return Ok(());
+        return parse_unmap(rest, *modes, vimrc, leaders);
     }
     Err(tf!(
         "unsupported command \"{command}\" (available: map / noremap / nmap / imap / vmap / xmap / omap / cmap / map! and their noremap and unmap versions, let mapleader, set timeoutlen)",
         "対応していないコマンド \"{command}\" (使えるもの: map / noremap / nmap / imap / vmap / xmap / omap / cmap / map! と、それぞれの noremap 版・unmap 版、let mapleader、set timeoutlen)"
     ))
+}
+
+fn parse_unmap(rest: &str, modes: u8, vimrc: &mut Vimrc, leaders: &Leaders) -> Result<(), String> {
+    let (rest, _) = map_arguments(rest)?;
+    let (lhs, extra) = split_word(rest);
+    if lhs.is_empty() || !extra.is_empty() {
+        return Err(t!(
+            "write it as `unmap {lhs}`",
+            "`unmap {lhs}` の形で書いてください"
+        )
+        .to_string());
+    }
+    let lhs = parse_notation(lhs, leaders)?;
+    if !vimrc.remove(modes, &lhs) {
+        return Err(t!(
+            "no such mapping (to disable a built-in key, map it to <Nop>, e.g. `nnoremap q <Nop>`)",
+            "そのマッピングはありません (既定のキーを無効にするには `nnoremap q <Nop>` のように <Nop> に割り当ててください)"
+        )
+        .to_string());
+    }
+    Ok(())
 }
 
 /// 先頭の空白区切りの単語と、残り (先頭の空白は除く)。
@@ -567,31 +534,19 @@ fn special_key(name: &str) -> Option<KeyStroke> {
         rest = &rest[2..];
     }
     let lower = rest.to_ascii_lowercase();
+    // Vim だけの別名。それ以外の名前は config.jsonc の "keymap" と共通
     let code = match lower.as_str() {
         "esc" => KeyCode::Esc,
-        "cr" | "enter" | "return" => KeyCode::Enter,
-        "tab" => KeyCode::Tab,
-        "bs" | "backspace" => KeyCode::Backspace,
-        "del" | "delete" => KeyCode::Delete,
-        "space" => KeyCode::Char(' '),
+        "cr" | "return" => KeyCode::Enter,
+        "bs" => KeyCode::Backspace,
+        "del" => KeyCode::Delete,
+        "ins" => KeyCode::Insert,
         "bar" => KeyCode::Char('|'),
         "bslash" => KeyCode::Char('\\'),
         "lt" => KeyCode::Char('<'),
-        "up" => KeyCode::Up,
-        "down" => KeyCode::Down,
-        "left" => KeyCode::Left,
-        "right" => KeyCode::Right,
-        "home" => KeyCode::Home,
-        "end" => KeyCode::End,
-        "pageup" => KeyCode::PageUp,
-        "pagedown" => KeyCode::PageDown,
-        "insert" | "ins" => KeyCode::Insert,
-        _ => {
-            if let Some(n) = lower.strip_prefix('f').and_then(|n| n.parse::<u8>().ok())
-                && (1..=12).contains(&n)
-            {
-                KeyCode::F(n)
-            } else {
+        name => match named_key(name) {
+            Some(code) => code,
+            None => {
                 let mut it = rest.chars();
                 match (it.next(), it.next()) {
                     // `<a>` は特殊キーではない (修飾キーがあるときだけ 1 文字を受け付ける)
@@ -599,7 +554,7 @@ fn special_key(name: &str) -> Option<KeyStroke> {
                     _ => return None,
                 }
             }
-        }
+        },
     };
     // 文字キーの Shift は大文字で表す (KeyStroke::from_event と同じ)。Ctrl+文字は大小を区別しない
     let code = match code {
@@ -609,7 +564,7 @@ fn special_key(name: &str) -> Option<KeyStroke> {
             if mods.contains(KeyModifiers::CONTROL) {
                 KeyCode::Char(c.to_ascii_lowercase())
             } else if shift {
-                KeyCode::Char(c.to_ascii_uppercase())
+                KeyCode::Char(upper(c))
             } else {
                 KeyCode::Char(c)
             }

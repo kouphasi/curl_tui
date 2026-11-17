@@ -512,12 +512,8 @@ impl KeyStroke {
             rest = r;
         }
         let mut chars = rest.chars();
-        let code = if let Some((_, code)) = NAMED_KEYS.iter().find(|(n, _)| *n == rest) {
-            *code
-        } else if let Some(n) = rest.strip_prefix('f').and_then(|n| n.parse::<u8>().ok())
-            && (1..=12).contains(&n)
-        {
-            KeyCode::F(n)
+        let code = if let Some(code) = named_key(rest) {
+            code
         } else if let (Some(c), None) = (chars.next(), chars.next()) {
             KeyCode::Char(c)
         } else {
@@ -566,7 +562,16 @@ impl KeyStroke {
     }
 }
 
-fn upper(c: char) -> char {
+/// 名前の付いたキー (`"enter"` / `"pageup"` / `"f5"`)。小文字で渡す。
+pub(crate) fn named_key(name: &str) -> Option<KeyCode> {
+    if let Some((_, code)) = NAMED_KEYS.iter().find(|(n, _)| *n == name) {
+        return Some(*code);
+    }
+    let n = name.strip_prefix('f')?.parse::<u8>().ok()?;
+    (1..=12).contains(&n).then_some(KeyCode::F(n))
+}
+
+pub(crate) fn upper(c: char) -> char {
     let mut it = c.to_uppercase();
     match (it.next(), it.next()) {
         (Some(u), None) => u,
