@@ -142,6 +142,7 @@ commands! {
     EditorKillToLineEnd => "editor::KillToLineEnd", "Delete to the end of the line", "行末まで削除";
     EditorClear => "editor::Clear", "Clear all input", "入力内容をすべて消す";
     EditorNewline => "editor::Newline", "Insert a newline", "改行";
+    EditorOpenExternal => "editor::OpenExternal", "Open the focused text field (URL / Params / Headers / Body) in $EDITOR and apply it when the editor closes (same as :edit)", "選択中のテキスト欄 (URL / Params / Headers / Body) を $EDITOR で開き、閉じたら反映する (:edit と同じ)";
 
     CommandCancel => "command::Cancel", "Close the command line", "コマンドラインを閉じる";
     CommandExecute => "command::Execute", "Run the command", "コマンドを実行";
@@ -770,6 +771,7 @@ pub const DEFAULTS: &[(&str, &[(&str, Command)])] = &[
             ("y", Command::VimYank),
             ("v", Command::VimVisual),
             ("shift-v", Command::VimVisualLine),
+            ("ctrl-e", Command::EditorOpenExternal),
         ],
     ),
     // 読み取り専用のテキスト: 移動と選択・ヤンクだけ (Response のスクロールより優先する)

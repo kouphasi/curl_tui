@@ -10,6 +10,7 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 
 - メソッド切り替え (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS)
 - URL・クエリパラメータ・ヘッダ・ボディの編集 (`#` で始まる行は無効化)
+- 外部エディタでの編集 (`Ctrl+E` で選択中の欄を `$EDITOR` (nvim など) で開き、保存して閉じると反映。lazygit と同じ方式)
 - 非同期送信 (UI をブロックしない / スピナー表示 / 30 秒タイムアウト)
 - レスポンスのステータス・所要時間・サイズ・ヘッダ表示、JSON の自動整形
 - HTML レスポンスのプレビュー (Preview タブ。ヘッドレス Chromium で描画し、kitty graphics protocol で端末に表示)
@@ -71,6 +72,7 @@ Normal はブロックカーソル、Insert はバーカーソルで表示され
 | `m` / `M` | メソッド切り替え |
 | `H` / `L`, `gT` / `gt`, `1`-`4` | タブ切り替え |
 | `?` | ヘルプ |
+| `Ctrl+E` / `:edit` (`:e`) | 選択中のテキスト欄 (URL / Params / Headers / Body) を `$EDITOR` で開き、保存して閉じると反映 (`u` で元に戻せる) |
 | `:config` | キーバインドの設定ファイルをエディタで開く |
 | `:vimrc` | Vim 形式のマッピング (vimrc) をエディタで開く |
 | `q` / `Ctrl+C` | 終了 |
@@ -106,6 +108,7 @@ Collection から `Ctrl+L` で戻ると、直前にいた右側のペインに�
 | `p` / `P`, `Y` | 貼り付け (後 / 前)、行ヤンク |
 | `v` / `V` | Visual モード (文字単位 / 行単位) で選択。`y` でクリップボードにコピー |
 | `u` | 元に戻す (Insert 1 回分をまとめて戻す) |
+| `Ctrl+E` (Normal 中) / `:edit` | 欄の内容を `$EDITOR` で開く。保存して閉じると反映 (`u` で編集前に戻せる)。Body は中身に応じて `.json` / `.html` / `.xml` の一時ファイルになるのでハイライトが効く |
 | `Ctrl+W` / `Ctrl+H` (Insert 中) | 直前の単語 / 1 文字を削除 |
 | `Ctrl+A` / `Ctrl+E` / `Ctrl+K` / `Ctrl+U` (Insert 中) | 行頭 / 行末 / 行末まで削除 / 全消去 |
 
@@ -211,7 +214,7 @@ GUI のエディタを使う場合は、`EDITOR="code --wait"` のように閉�
 | --- | --- |
 | `CURL_TUI_CONFIG` | 設定ファイルの場所を変える |
 | `CURL_TUI_VIMRC` | vimrc の場所を変える (既定は設定ファイルと同じディレクトリの `vimrc`) |
-| `VISUAL` / `EDITOR` | `:config` で使うエディタ |
+| `VISUAL` / `EDITOR` | `:config` / `:edit` (`Ctrl+E`) で使うエディタ (未設定なら `vi`) |
 
 ## Vim 形式のマッピング (vimrc)
 

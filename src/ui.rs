@@ -169,12 +169,13 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         ],
         (_, Focus::Url) => &[
             ("i/a/A", "Insert", "挿入"),
-            ("hjkl/w/b", "Move", "移動"),
+            ("Ctrl+E", "$EDITOR", "$EDITOR"),
             ("m/M", "Method", "メソッド"),
             ("Ctrl+R", "Send", "送信"),
         ],
         (_, Focus::Request) if editor_focused => &[
             ("i/a/o", "Insert", "挿入"),
+            ("Ctrl+E", "Edit in $EDITOR", "$EDITOR で編集"),
             ("dd/x/p/u", "Edit", "編集"),
             ("H/L", "Tabs", "タブ"),
             ("Ctrl+R", "Send", "送信"),
@@ -788,6 +789,12 @@ fn draw_help(frame: &mut Frame) {
             "",
             "Paste after / paste before / undo",
             "貼り付け / 前に貼り付け / 元に戻す",
+        ),
+        (
+            "Ctrl+E / :edit",
+            "",
+            "Edit the text field in $EDITOR (e.g. nvim); applied when it closes",
+            "テキスト欄を $EDITOR (nvim など) で編集。閉じると反映",
         ),
         (
             "Ctrl+D/U/F/B",

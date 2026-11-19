@@ -197,6 +197,26 @@ pub enum Mode {
     Help,
 }
 
+/// 外部エディタ ($EDITOR) で編集できるテキスト欄。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextField {
+    Url,
+    Params,
+    Headers,
+    Body,
+}
+
+impl TextField {
+    pub fn name(self) -> &'static str {
+        match self {
+            TextField::Url => "URL",
+            TextField::Params => "Params",
+            TextField::Headers => "Headers",
+            TextField::Body => "Body",
+        }
+    }
+}
+
 /// main ループに実行してほしい副作用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -212,6 +232,12 @@ pub enum Action {
     EditVimrc,
     /// テキストをクリップボードにコピーする
     Copy(String),
+    /// テキスト欄の内容を外部エディタ ($EDITOR) で開き、閉じたら
+    /// [`App::apply_external_edit`] で書き戻す
+    EditText {
+        field: TextField,
+        text: String,
+    },
 }
 
 /// Visual モードの選択状態 (選択を始めた位置と、行単位かどうか)。
@@ -922,6 +948,70 @@ impl App {
         self.response_tab == ResponseTab::Preview && self.preview_unavailable.is_none()
     }
 
+    /// フォーカス中の編集できるテキスト欄。
+    fn focused_field(&self) -> Option<TextField> {
+        match self.focus {
+            Focus::Url => Some(TextField::Url),
+            Focus::Request => match self.request_tab {
+                RequestTab::Params => Some(TextField::Params),
+                RequestTab::Headers => Some(TextField::Headers),
+                RequestTab::Body => Some(TextField::Body),
+                RequestTab::Curl => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn field_mut(&mut self, field: TextField) -> &mut TextEditor {
+        match field {
+            TextField::Url => &mut self.url,
+            TextField::Params => &mut self.params,
+            TextField::Headers => &mut self.headers,
+            TextField::Body => &mut self.body,
+        }
+    }
+
+    /// フォーカス中のテキスト欄を外部エディタで開く (lazygit の `e` と同じ考え方)。
+    fn open_external(&mut self) -> Action {
+        self.back_to_normal();
+        let Some(field) = self.focused_field() else {
+            self.status = t!(
+                "Focus URL / Params / Headers / Body to open it in the editor",
+                "URL / Params / Headers / Body を選んでからエディタで開いてください"
+            )
+            .to_string();
+            return Action::None;
+        };
+        let text = self.field_mut(field).text();
+        Action::EditText { field, text }
+    }
+
+    /// 外部エディタで編集した内容を書き戻す。`u` で編集前に戻せる。
+    pub fn apply_external_edit(&mut self, field: TextField, text: &str) {
+        // エディタは末尾に改行を足すことが多いので 1 つだけ取り除く
+        let text = text
+            .strip_suffix("\r\n")
+            .or_else(|| text.strip_suffix('\n'))
+            .unwrap_or(text);
+        let ed = self.field_mut(field);
+        if ed.text() == text {
+            self.status = tf!("{f}: no changes", "{f}: 変更なし", f = field.name());
+            return;
+        }
+        let (row, col) = ed.cursor();
+        ed.checkpoint();
+        ed.replace_all(text);
+        ed.set_cursor(row, col);
+        ed.clamp_normal();
+        self.commit();
+        self.sync_curl_view();
+        self.status = tf!(
+            "{f}: applied the edit (u to undo)",
+            "{f}: 編集内容を反映しました (u で元に戻す)",
+            f = field.name()
+        );
+    }
+
     /// フォーカス中のペインが編集できるテキスト欄か。
     fn editable(&self) -> bool {
         match self.focus {
@@ -1043,8 +1133,11 @@ impl App {
                 (Action::None, Some(text)) => Action::Copy(text),
                 (action, _) => action,
             };
-            if matches!(action, Action::EditConfig | Action::EditVimrc) {
-                // エディタを開くときは残りのキーを捨てる (設定を読み直すため)
+            if matches!(
+                action,
+                Action::EditConfig | Action::EditVimrc | Action::EditText { .. }
+            ) {
+                // エディタを開くときは残りのキーを捨てる (設定や内容が変わるため)
                 self.clear_typeahead();
             }
             if action != Action::None {
@@ -1178,6 +1271,7 @@ impl App {
                 self.back_to_normal();
                 return Action::EditVimrc;
             }
+            C::EditorOpenExternal => return self.open_external(),
             C::AppShowHelp => {
                 self.back_to_normal();
                 self.mode = Mode::Help;
@@ -1568,6 +1662,7 @@ impl App {
             }
             "config" | "keymap" => Action::EditConfig,
             "vimrc" => Action::EditVimrc,
+            "e" | "edit" => self.open_external(),
             _ => {
                 self.status = tf!("Unknown command: :{cmd}", "不明なコマンド: :{cmd}");
                 Action::None
@@ -2740,6 +2835,70 @@ mod tests {
         type_str(&mut app, ":vimrc");
         assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::EditVimrc);
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn ctrl_e_opens_focused_field_in_external_editor() {
+        let mut app = App::new(vec![Request {
+            url: "http://a".into(),
+            body: "{\"a\":1}".into(),
+            ..Default::default()
+        }]);
+        assert_eq!(
+            app.handle_key(ctrl('e')),
+            Action::EditText {
+                field: TextField::Url,
+                text: "http://a".into()
+            }
+        );
+        app.focus = Focus::Request;
+        app.request_tab = RequestTab::Body;
+        assert_eq!(
+            app.handle_key(ctrl('e')),
+            Action::EditText {
+                field: TextField::Body,
+                text: "{\"a\":1}".into()
+            }
+        );
+        // Insert モードからでも :edit で開ける (Normal に戻る)
+        type_str(&mut app, "i");
+        assert_eq!(app.mode, Mode::Editing);
+        app.handle_key(key(KeyCode::Esc));
+        type_str(&mut app, ":edit");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Action::EditText {
+                field: TextField::Body,
+                ..
+            }
+        ));
+        // cURL タブは読み取り専用なので開かない
+        app.request_tab = RequestTab::Curl;
+        type_str(&mut app, ":e");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Action::None);
+    }
+
+    #[test]
+    fn external_edit_is_applied_and_undoable() {
+        let mut app = App::new(vec![Request {
+            url: "http://a".into(),
+            ..Default::default()
+        }]);
+        app.focus = Focus::Request;
+        app.request_tab = RequestTab::Headers;
+        app.apply_external_edit(TextField::Headers, "Accept: */*\n# X-Debug: 1\n");
+        // エディタが足した末尾の改行は 1 つだけ取り除く
+        assert_eq!(app.headers.text(), "Accept: */*\n# X-Debug: 1");
+        let req = &app.collection[0];
+        assert_eq!(req.headers.len(), 2);
+        assert!(!req.headers[1].enabled);
+        assert!(app.curl_text.contains("Accept: */*"));
+        type_str(&mut app, "u");
+        assert_eq!(app.headers.text(), "");
+
+        app.apply_external_edit(TextField::Url, "http://b\n");
+        assert_eq!(app.url.text(), "http://b");
+        assert_eq!(app.current_request().url, "http://b");
     }
 
     #[test]
