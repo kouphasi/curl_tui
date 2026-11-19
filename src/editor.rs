@@ -75,6 +75,11 @@ impl TextEditor {
         self.replace_text(text);
     }
 
+    /// テキスト全体を置き換える。undo 履歴は残す (直前に `checkpoint` を呼ぶこと)。
+    pub fn replace_all(&mut self, text: &str) {
+        self.replace_text(text);
+    }
+
     fn replace_text(&mut self, text: &str) {
         self.lines = if self.multiline {
             text.split('\n')

@@ -20,7 +20,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
 use curl_tui::{
-    app::{Action, App, Mode, PreviewState, ResponseState},
+    app::{Action, App, Mode, PreviewState, ResponseState, TextField},
     clipboard, collection, config, http, i18n, kitty,
     model::Response,
     preview, t, tf, vimrc,
@@ -238,6 +238,27 @@ fn reload_vimrc(app: &mut App, path: &Path) -> String {
     }
 }
 
+/// TUI を一時的に抜けて `path` をエディタ ($VISUAL / $EDITOR) で開き、閉じるまで待つ。
+/// エディタを起動できなければ、ステータス行に出す文言を返す。
+fn run_editor(terminal: &mut DefaultTerminal, path: &Path) -> Result<Result<(), String>> {
+    disable_extras(enhanced());
+    ratatui::restore();
+    let (program, args) = config::editor_command();
+    let edited = std::process::Command::new(&program)
+        .args(&args)
+        .arg(path)
+        .status();
+    // 端末を作り直して全体を描き直す (Terminal::clear はカーソル位置の問い合わせで失敗しうる)
+    *terminal = ratatui::init();
+    enable_extras(enhanced())?;
+    Ok(edited.map(|_| ()).map_err(|e| {
+        tf!(
+            "Cannot launch the editor `{program}` (check $EDITOR): {e}",
+            "エディタ `{program}` を起動できません ($EDITOR を確認してください): {e}"
+        )
+    }))
+}
+
 /// TUI を一時的に抜けて設定ファイルをエディタで開き、閉じたら読み直す。
 fn edit_config(
     terminal: &mut DefaultTerminal,
@@ -257,23 +278,9 @@ fn edit_config(
         );
         return Ok(());
     }
-    disable_extras(enhanced());
-    ratatui::restore();
-    let (program, args) = config::editor_command();
-    let edited = std::process::Command::new(&program)
-        .args(&args)
-        .arg(path)
-        .status();
-    // 端末を作り直して全体を描き直す (Terminal::clear はカーソル位置の問い合わせで失敗しうる)
-    *terminal = ratatui::init();
-    enable_extras(enhanced())?;
-
-    app.status = match edited {
-        Err(e) => tf!(
-            "Cannot launch the editor `{program}` (check $EDITOR): {e}",
-            "エディタ `{program}` を起動できません ($EDITOR を確認してください): {e}"
-        ),
-        Ok(_) => match target {
+    app.status = match run_editor(terminal, path)? {
+        Err(msg) => msg,
+        Ok(()) => match target {
             EditTarget::Config => reload_config(app, path),
             EditTarget::Vimrc => reload_vimrc(app, path),
         },
@@ -281,6 +288,69 @@ fn edit_config(
     // 言語が変わったかもしれないので、表示済みの文言を作り直す
     app.preview_unavailable = preview_unavailable(browser);
     Ok(())
+}
+
+/// テキスト欄の内容を一時ファイルに書いてエディタで開き、閉じたら書き戻す (lazygit と同じ方式)。
+fn edit_text(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    field: TextField,
+    text: &str,
+) -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "curl_tui-{}-{}.{}",
+        std::process::id(),
+        field.name().to_ascii_lowercase(),
+        temp_extension(field, text)
+    ));
+    // 多くのエディタは最終行に改行を付けるので、こちらも付けて渡す (戻すときに 1 つ取る)
+    let content = if text.is_empty() {
+        String::new()
+    } else {
+        format!("{text}\n")
+    };
+    if let Err(e) = std::fs::write(&path, content) {
+        app.status = tf!(
+            "Cannot create a temporary file: {e}",
+            "一時ファイルを作れません: {e}"
+        );
+        return Ok(());
+    }
+    let result = run_editor(terminal, &path)?;
+    let edited = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+    match (result, edited) {
+        (Err(msg), _) => app.status = msg,
+        (Ok(()), Err(e)) => {
+            app.status = tf!(
+                "Cannot read the edited file (not applied): {e}",
+                "編集したファイルを読めません (未反映): {e}"
+            )
+        }
+        (Ok(()), Ok(edited)) => app.apply_external_edit(field, &edited),
+    }
+    Ok(())
+}
+
+/// 一時ファイルの拡張子。エディタの構文ハイライトが効くよう、Body は中身から推測する。
+fn temp_extension(field: TextField, text: &str) -> &'static str {
+    match field {
+        TextField::Body => {
+            let t = text.trim_start();
+            if t.starts_with('{') || t.starts_with('[') {
+                "json"
+            } else if t.starts_with('<') {
+                if t.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("<?xml")) {
+                    "xml"
+                } else {
+                    "html"
+                }
+            } else {
+                "txt"
+            }
+        }
+        _ => "txt",
+    }
 }
 
 /// 描画結果 (どのレスポンスのものか, 描画した幅のセル数, 結果)。
@@ -323,6 +393,7 @@ async fn run(
         }
 
         let mut open_config = None;
+        let mut open_text = None;
         // "vimrc" のマッピングの続きのキーを待っているなら、その期限
         let deadline = app.key_deadline();
         let mut action = tokio::select! {
@@ -393,6 +464,7 @@ async fn run(
                 },
                 Action::EditConfig => open_config = Some(EditTarget::Config),
                 Action::EditVimrc => open_config = Some(EditTarget::Vimrc),
+                Action::EditText { field, text } => open_text = Some((field, text)),
                 Action::Copy(text) => {
                     if let Err(e) = clipboard::copy(&text, &mut std::io::stdout()) {
                         app.status = tf!("Failed to copy: {e}", "コピーに失敗: {e}");
@@ -404,7 +476,7 @@ async fn run(
             }
             action = app.resume_keys();
         }
-        if let Some(target) = open_config {
+        if open_config.is_some() || open_text.is_some() {
             // 入力の読み取りを止めてからエディタに端末を渡す (止めないとキー入力を奪い合う)
             drop(events);
             if placed.take().is_some() {
@@ -412,7 +484,11 @@ async fn run(
                 out.write_all(kitty::hide().as_bytes())?;
                 out.flush()?;
             }
-            let edited = edit_config(terminal, app, target, files, browser.as_deref());
+            let edited = match (open_config, open_text) {
+                (Some(target), _) => edit_config(terminal, app, target, files, browser.as_deref()),
+                (None, Some((field, text))) => edit_text(terminal, app, field, &text),
+                (None, None) => Ok(()),
+            };
             events = EventStream::new();
             cursor_mode = None;
             edited?;
