@@ -1,6 +1,7 @@
 //! 設定ファイル (`~/.config/curl_tui/config.jsonc`) の読み込みと雛形の生成。
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
@@ -465,10 +466,64 @@ pub fn editor_command() -> (String, Vec<String>) {
     (program, parts.collect())
 }
 
+/// エディタに渡すファイルの引数。`line` (1 始まり) が 2 以上で、行の指定方法を
+/// 知っているエディタなら、その行から開くように指定する。知らないエディタはファイルだけ渡す。
+pub fn editor_file_args(program: &str, path: &Path, line: Option<usize>) -> Vec<OsString> {
+    let plain = vec![path.as_os_str().to_owned()];
+    let Some(line) = line.filter(|&l| l > 1) else {
+        return plain;
+    };
+    let name = Path::new(program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let with_line = || {
+        let mut s = path.as_os_str().to_owned();
+        s.push(format!(":{line}"));
+        s
+    };
+    match name.as_str() {
+        // `+行番号 ファイル` 形式
+        "vi" | "vim" | "nvim" | "gvim" | "mvim" | "view" | "nano" | "emacs" | "emacsclient"
+        | "micro" | "kak" | "mg" | "joe" | "ne" => {
+            vec![
+                OsString::from(format!("+{line}")),
+                path.as_os_str().to_owned(),
+            ]
+        }
+        // `-g ファイル:行番号` 形式 (VS Code 系)
+        "code" | "code-insiders" | "codium" | "cursor" | "windsurf" => {
+            vec![OsString::from("-g"), with_line()]
+        }
+        // `ファイル:行番号` 形式
+        "subl" | "hx" | "helix" | "zed" => vec![with_line()],
+        _ => plain,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::keymap::{ContextSet, Lookup, parse_keys};
+
+    #[test]
+    fn editor_args_open_at_the_line_when_known() {
+        let p = Path::new("/tmp/body.json");
+        let args = |prog: &str, line| {
+            editor_file_args(prog, p, line)
+                .into_iter()
+                .map(|a| a.into_string().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(args("/usr/bin/nvim", Some(3)), ["+3", "/tmp/body.json"]);
+        assert_eq!(args("code", Some(3)), ["-g", "/tmp/body.json:3"]);
+        assert_eq!(args("hx", Some(3)), ["/tmp/body.json:3"]);
+        // 1 行目や行の指定方法を知らないエディタはファイルだけ
+        assert_eq!(args("vim", Some(1)), ["/tmp/body.json"]);
+        assert_eq!(args("vim", None), ["/tmp/body.json"]);
+        assert_eq!(args("notepad", Some(3)), ["/tmp/body.json"]);
+    }
 
     #[test]
     fn strips_comments_and_trailing_commas() {
