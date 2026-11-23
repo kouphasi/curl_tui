@@ -16,6 +16,7 @@ use crate::curl;
 use crate::editor::TextEditor;
 use crate::keymap::{Command, ContextSet, Ctx, KeyStroke, Keymap, Lookup};
 use crate::model::{self, HttpMethod, Request, Response};
+use crate::validate::{self, Diagnostic, Severity};
 use crate::vimrc::{MapMode, Vimrc};
 use crate::{t, tf};
 
@@ -237,6 +238,8 @@ pub enum Action {
     EditText {
         field: TextField,
         text: String,
+        /// カーソルのある行 (1 始まり)。対応しているエディタではこの行から開く
+        line: usize,
     },
 }
 
@@ -380,7 +383,16 @@ pub struct App {
     typeahead: VecDeque<Queued>,
     /// マッピングの続きのキーを待ち始めた時刻 (待っていないときは None)
     waiting_since: Option<Instant>,
+    /// 検査でエラーが出て送信を止めたときの入力内容。同じ内容でもう一度送信すると、そのまま送る
+    send_anyway: Option<Draft>,
+    /// 送信時に出た警告。レスポンスが届いたらステータスに添える
+    send_warning: Option<String>,
 }
+
+/// 送信前の入力内容 (メソッドと各欄のテキスト)。`Request` に変換すると消える行
+/// (キーが空の Params など) の変更も見分けられるよう、テキストのまま比べる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Draft(HttpMethod, [String; 4]);
 
 /// typeahead の 1 キー。
 #[derive(Debug, Clone, Copy)]
@@ -445,6 +457,8 @@ impl App {
             vimrc: Vimrc::default(),
             typeahead: VecDeque::new(),
             waiting_since: None,
+            send_anyway: None,
+            send_warning: None,
         };
         app.load_selected();
         app.sync_curl_view();
@@ -739,9 +753,13 @@ impl App {
         match result {
             Ok(r) => {
                 self.status = format!("{} {} ({} ms)", r.status, r.status_text, r.elapsed_ms);
+                if let Some(w) = self.send_warning.take() {
+                    self.status = format!("{} — ⚠ {w}", self.status);
+                }
                 self.response = ResponseState::Done(r);
             }
             Err(e) => {
+                self.send_warning = None;
                 self.status = t!("Request failed", "送信に失敗しました").to_string();
                 self.response = ResponseState::Failed(e);
             }
@@ -982,8 +1000,10 @@ impl App {
             .to_string();
             return Action::None;
         };
-        let text = self.field_mut(field).text();
-        Action::EditText { field, text }
+        let ed = self.field_mut(field);
+        let text = ed.text();
+        let line = ed.cursor().0 + 1;
+        Action::EditText { field, text, line }
     }
 
     /// 外部エディタで編集した内容を書き戻す。`u` で編集前に戻せる。
@@ -996,6 +1016,7 @@ impl App {
         let ed = self.field_mut(field);
         if ed.text() == text {
             self.status = tf!("{f}: no changes", "{f}: 変更なし", f = field.name());
+            self.report_edit_problems(field);
             return;
         }
         let (row, col) = ed.cursor();
@@ -1010,6 +1031,81 @@ impl App {
             "{f}: 編集内容を反映しました (u で元に戻す)",
             f = field.name()
         );
+        self.report_edit_problems(field);
+    }
+
+    /// 外部エディタで編集した欄を検査し、問題があれば最初の位置にカーソルを置いて知らせる。
+    /// カーソルがその行にあるので、もう一度 `:edit` すれば該当行から開ける。
+    fn report_edit_problems(&mut self, field: TextField) {
+        let diags = self.diagnostics(field);
+        let Some(first) = diags.first() else {
+            return;
+        };
+        let msg = describe_problem(field, first, diags.len() - 1);
+        let ed = self.field_mut(field);
+        ed.set_cursor(first.line, first.col);
+        ed.clamp_normal();
+        self.status = if first.severity == Severity::Error {
+            tf!("{msg} — :edit to fix it", "{msg} — :edit で直せます")
+        } else {
+            format!("⚠ {msg}")
+        };
+    }
+
+    /// 欄の内容を検査する。エラーを警告より先に、同じ重さなら上の行から並べる。
+    pub fn diagnostics(&self, field: TextField) -> Vec<Diagnostic> {
+        let mut diags = match field {
+            TextField::Url => Vec::new(),
+            TextField::Params => validate::check_params(&self.params.text()),
+            TextField::Headers => validate::check_headers(&self.headers.text()),
+            TextField::Body => validate::check_body(
+                &self.body.text(),
+                validate::content_type(&self.headers.text()).as_deref(),
+                self.method,
+            ),
+        };
+        diags.sort_by_key(|d| (d.severity, d.line, d.col));
+        diags
+    }
+
+    fn draft(&self) -> Draft {
+        Draft(
+            self.method,
+            [
+                self.url.text(),
+                self.params.text(),
+                self.headers.text(),
+                self.body.text(),
+            ],
+        )
+    }
+
+    /// Params / Headers / Body の問題点を、エラーを先にしてまとめて返す。
+    fn request_problems(&self) -> Vec<(TextField, Diagnostic)> {
+        let mut all: Vec<_> = [TextField::Params, TextField::Headers, TextField::Body]
+            .into_iter()
+            .flat_map(|f| self.diagnostics(f).into_iter().map(move |d| (f, d)))
+            .collect();
+        all.sort_by_key(|(_, d)| d.severity);
+        all
+    }
+
+    /// 問題のある欄のタブを開き、その位置にカーソルを置く。
+    fn jump_to_problem(&mut self, field: TextField, d: &Diagnostic) {
+        self.back_to_normal();
+        self.request_tab = match field {
+            TextField::Url => {
+                self.set_focus(Focus::Url);
+                return;
+            }
+            TextField::Params => RequestTab::Params,
+            TextField::Headers => RequestTab::Headers,
+            TextField::Body => RequestTab::Body,
+        };
+        self.set_focus(Focus::Request);
+        let ed = self.field_mut(field);
+        ed.set_cursor(d.line, d.col);
+        ed.clamp_normal();
     }
 
     /// フォーカス中のペインが編集できるテキスト欄か。
@@ -1511,6 +1607,34 @@ impl App {
             self.status = e.to_string();
             return Action::None;
         }
+        let problems = self.request_problems();
+        let errors = problems
+            .iter()
+            .filter(|(_, d)| d.severity == Severity::Error)
+            .count();
+        if let Some((field, first)) = problems.first()
+            && first.severity == Severity::Error
+            && self.send_anyway.as_ref() != Some(&self.draft())
+        {
+            // 同じ内容でもう一度送信されたら、エラーがあってもそのまま送る
+            let msg = describe_problem(*field, first, errors - 1);
+            let (field, first) = (*field, first.clone());
+            self.send_anyway = Some(self.draft());
+            self.jump_to_problem(field, &first);
+            self.status = tf!(
+                "Not sent: {msg} — fix it, or send again to send anyway",
+                "送信を止めました: {msg} — 直すか、もう一度送信するとそのまま送ります"
+            );
+            return Action::None;
+        }
+        self.send_anyway = None;
+        let warnings: Vec<_> = problems
+            .iter()
+            .filter(|(_, d)| d.severity == Severity::Warning)
+            .collect();
+        self.send_warning = warnings
+            .first()
+            .map(|(f, d)| describe_problem(*f, d, warnings.len() - 1));
         self.response = ResponseState::Loading;
         self.response_scroll = 0;
         self.status = tf!(
@@ -2156,6 +2280,22 @@ impl App {
 }
 
 /// モーションの移動先。
+/// ステータス行に出す問題点の説明: `Headers line 2: ... (+1 more)`。
+fn describe_problem(field: TextField, d: &Diagnostic, more: usize) -> String {
+    let more = if more == 0 {
+        String::new()
+    } else {
+        tf!(" (+{more} more)", " (他 {more} 件)")
+    };
+    tf!(
+        "{f} line {l}: {m}{more}",
+        "{f} {l} 行目: {m}{more}",
+        f = field.name(),
+        l = d.line + 1,
+        m = d.message
+    )
+}
+
 fn motion_target(ed: &TextEditor, motion: Motion) -> (usize, usize) {
     let (row, col) = ed.cursor();
     let last_row = ed.line_count() - 1;
@@ -2848,7 +2988,8 @@ mod tests {
             app.handle_key(ctrl('e')),
             Action::EditText {
                 field: TextField::Url,
-                text: "http://a".into()
+                text: "http://a".into(),
+                line: 1,
             }
         );
         app.focus = Focus::Request;
@@ -2857,7 +2998,8 @@ mod tests {
             app.handle_key(ctrl('e')),
             Action::EditText {
                 field: TextField::Body,
-                text: "{\"a\":1}".into()
+                text: "{\"a\":1}".into(),
+                line: 1,
             }
         );
         // Insert モードからでも :edit で開ける (Normal に戻る)
@@ -2899,6 +3041,101 @@ mod tests {
         app.apply_external_edit(TextField::Url, "http://b\n");
         assert_eq!(app.url.text(), "http://b");
         assert_eq!(app.current_request().url, "http://b");
+    }
+
+    #[test]
+    fn external_edit_reports_problems_and_moves_the_cursor() {
+        let mut app = App::new(vec![Request {
+            url: "http://a".into(),
+            ..Default::default()
+        }]);
+        app.focus = Focus::Request;
+        app.request_tab = RequestTab::Headers;
+        app.apply_external_edit(
+            TextField::Headers,
+            "Accept: */*\nContent-Type application/json\n",
+        );
+        assert!(app.status.contains("Headers line 2"), "{}", app.status);
+        assert!(app.status.contains(":edit"));
+        assert_eq!(app.headers.cursor().0, 1);
+        // カーソルの行から開き直せる
+        assert!(matches!(
+            app.handle_key(ctrl('e')),
+            Action::EditText { line: 2, .. }
+        ));
+
+        // 変更がなくても問題は知らせる
+        app.apply_external_edit(
+            TextField::Headers,
+            "Accept: */*\nContent-Type application/json",
+        );
+        assert!(app.status.contains("Headers line 2"));
+
+        // 問題がなければ普通に反映した旨だけ
+        app.apply_external_edit(TextField::Headers, "Content-Type: application/json");
+        assert!(app.status.contains("applied"), "{}", app.status);
+
+        // JSON の Body は壊れた位置を知らせる
+        app.request_tab = RequestTab::Body;
+        app.apply_external_edit(TextField::Body, "{\n  \"a\": 1,\n}\n");
+        assert!(app.status.contains("Body line 3"), "{}", app.status);
+        assert_eq!(app.body.cursor().0, 2);
+    }
+
+    #[test]
+    fn send_is_blocked_on_errors_until_sent_again() {
+        let mut app = App::new(vec![Request {
+            method: HttpMethod::Post,
+            url: "http://a".into(),
+            headers: vec![KeyValue::new("Content-Type", "application/json")],
+            body: "{\"a\": }".into(),
+            ..Default::default()
+        }]);
+        assert_eq!(app.handle_key(ctrl('r')), Action::None);
+        assert!(app.status.contains("Body line 1"), "{}", app.status);
+        assert_eq!(app.response, ResponseState::Empty);
+        // 問題のある欄に移動している
+        assert_eq!(app.focus, Focus::Request);
+        assert_eq!(app.request_tab, RequestTab::Body);
+        assert_eq!(app.body.cursor(), (0, 6));
+        // もう一度送信するとそのまま送る
+        assert!(matches!(app.handle_key(ctrl('r')), Action::Send(_)));
+    }
+
+    #[test]
+    fn send_is_blocked_again_after_an_edit() {
+        let mut app = App::new(vec![Request {
+            url: "http://a".into(),
+            ..Default::default()
+        }]);
+        app.params.set_text("=x");
+        assert_eq!(app.handle_key(ctrl('r')), Action::None);
+        assert_eq!(app.request_tab, RequestTab::Params);
+        // 中身を変えたら、また止める
+        app.params.set_text("=y");
+        assert_eq!(app.handle_key(ctrl('r')), Action::None);
+        assert!(app.status.contains("Params line 1"), "{}", app.status);
+        // 直せば送れる
+        app.params.set_text("a=y");
+        assert!(matches!(app.handle_key(ctrl('r')), Action::Send(_)));
+    }
+
+    #[test]
+    fn warnings_do_not_block_sending_and_show_after_the_response() {
+        let mut app = App::new(vec![Request {
+            method: HttpMethod::Post,
+            url: "http://a".into(),
+            body: "{\"a\": 1}".into(),
+            ..Default::default()
+        }]);
+        assert!(matches!(app.handle_key(ctrl('r')), Action::Send(_)));
+        app.set_response(Ok(Response {
+            status: 200,
+            status_text: "OK".into(),
+            ..Default::default()
+        }));
+        assert!(app.status.starts_with("200 OK"), "{}", app.status);
+        assert!(app.status.contains("Content-Type"), "{}", app.status);
     }
 
     #[test]

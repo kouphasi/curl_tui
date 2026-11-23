@@ -11,6 +11,7 @@ Rust で作った Postman 風の TUI HTTP クライアントです。
 - メソッド切り替え (GET / POST / PUT / PATCH / DELETE / HEAD / OPTIONS)
 - URL・クエリパラメータ・ヘッダ・ボディの編集 (`#` で始まる行は無効化)
 - 外部エディタでの編集 (`Ctrl+E` で選択中の欄を `$EDITOR` (nvim など) で開き、保存して閉じると反映。lazygit と同じ方式)
+- Params / Headers / Body の書式チェック (エディタを閉じた後と送信前。壊れた JSON や `:` のないヘッダ行などを行番号付きで知らせる)
 - 非同期送信 (UI をブロックしない / スピナー表示 / 30 秒タイムアウト)
 - レスポンスのステータス・所要時間・サイズ・ヘッダ表示、JSON の自動整形
 - HTML レスポンスのプレビュー (Preview タブ。ヘッドレス Chromium で描画し、kitty graphics protocol で端末に表示)
@@ -283,6 +284,24 @@ Preview タブを開くと、ヘッドレス Chromium で HTML を Response ペ�
 | `CURL_TUI_PREVIEW_ZOOM` | プレビュー倍率の初期値 (%)。例: `150` |
 | `CURL_TUI_GRAPHICS` | `kitty` で端末判定を飛ばして強制有効化、`none` で無効化 |
 
+## 書式チェック
+
+Params / Headers / Body の中身は、外部エディタで編集して閉じた後と、送信する直前に検査します。
+`#` で始まる行 (無効にした行) は検査しません。
+
+| 欄 | エラー (送信を止める) | 警告 (送信はする) |
+| --- | --- | --- |
+| Params | キーが空 (`=x`。この行は送られない) | `=` がない (値が空として送る) |
+| Headers | `:` がない、ヘッダ名に空白や記号がある、値に制御文字がある | `Content-Type` が複数ある、`Content-Length` / `Host` を手で書いている、値に日本語など ASCII 以外の文字がある |
+| Body | `Content-Type` が JSON (`application/json` や `+json`) なのに JSON として読めない | `Content-Type` がなく、`{` / `[` で始まる (JSON として壊れていればその位置も)、form (`application/x-www-form-urlencoded`) のキーが空・空白がエンコードされていない、GET / HEAD に Body がある |
+
+- **エディタを閉じた後**: 最初の問題の行と内容をステータス行に出し、カーソルをその位置に置きます。
+  そのまま `Ctrl+E` / `:edit` で開き直すと、その行から開きます
+  (vi / vim / nvim / nano / emacs / micro / kak / VS Code (`code`) / Cursor / Sublime Text (`subl`) / Helix (`hx`) / Zed などに対応)
+- **送信前**: エラーがあると送信せず、問題のある欄のタブを開いてカーソルをその位置に置きます。
+  内容を変えずにもう一度送信すると、エラーを無視してそのまま送ります。
+  警告だけなら送信し、レスポンスのステータスの後ろに `⚠` 付きで添えます
+
 ## cURL タブについて
 
 出力は bash / zsh / sh 向けです。値は `'…'` で囲み、中の `'` は `'\''` に置き換えています。
@@ -305,6 +324,7 @@ src/
 ├── clipboard.rs   # クリップボードへのコピー (コピーコマンド / OSC 52)
 ├── curl.rs        # curl コマンド生成 (bash / zsh / sh 向け)
 ├── model.rs       # Request / Response / ヘッダ・パラメータのパース、curl 生成
+├── validate.rs    # Params / Headers / Body の書式チェック
 ├── http.rs        # reqwest による送信、JSON 整形
 ├── preview.rs     # HTML をヘッドレス Chromium で PNG に描画
 ├── kitty.rs       # kitty graphics protocol のエスケープシーケンス生成・対応端末の判定

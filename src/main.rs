@@ -240,13 +240,18 @@ fn reload_vimrc(app: &mut App, path: &Path) -> String {
 
 /// TUI を一時的に抜けて `path` をエディタ ($VISUAL / $EDITOR) で開き、閉じるまで待つ。
 /// エディタを起動できなければ、ステータス行に出す文言を返す。
-fn run_editor(terminal: &mut DefaultTerminal, path: &Path) -> Result<Result<(), String>> {
+/// `line` (1 始まり) を渡すと、対応しているエディタではその行から開く。
+fn run_editor(
+    terminal: &mut DefaultTerminal,
+    path: &Path,
+    line: Option<usize>,
+) -> Result<Result<(), String>> {
     disable_extras(enhanced());
     ratatui::restore();
     let (program, args) = config::editor_command();
     let edited = std::process::Command::new(&program)
         .args(&args)
-        .arg(path)
+        .args(config::editor_file_args(&program, path, line))
         .status();
     // 端末を作り直して全体を描き直す (Terminal::clear はカーソル位置の問い合わせで失敗しうる)
     *terminal = ratatui::init();
@@ -278,7 +283,7 @@ fn edit_config(
         );
         return Ok(());
     }
-    app.status = match run_editor(terminal, path)? {
+    app.status = match run_editor(terminal, path, None)? {
         Err(msg) => msg,
         Ok(()) => match target {
             EditTarget::Config => reload_config(app, path),
@@ -296,6 +301,7 @@ fn edit_text(
     app: &mut App,
     field: TextField,
     text: &str,
+    line: usize,
 ) -> Result<()> {
     let path = std::env::temp_dir().join(format!(
         "curl_tui-{}-{}.{}",
@@ -316,7 +322,7 @@ fn edit_text(
         );
         return Ok(());
     }
-    let result = run_editor(terminal, &path)?;
+    let result = run_editor(terminal, &path, Some(line))?;
     let edited = std::fs::read_to_string(&path);
     let _ = std::fs::remove_file(&path);
     match (result, edited) {
@@ -464,7 +470,7 @@ async fn run(
                 },
                 Action::EditConfig => open_config = Some(EditTarget::Config),
                 Action::EditVimrc => open_config = Some(EditTarget::Vimrc),
-                Action::EditText { field, text } => open_text = Some((field, text)),
+                Action::EditText { field, text, line } => open_text = Some((field, text, line)),
                 Action::Copy(text) => {
                     if let Err(e) = clipboard::copy(&text, &mut std::io::stdout()) {
                         app.status = tf!("Failed to copy: {e}", "コピーに失敗: {e}");
@@ -486,7 +492,7 @@ async fn run(
             }
             let edited = match (open_config, open_text) {
                 (Some(target), _) => edit_config(terminal, app, target, files, browser.as_deref()),
-                (None, Some((field, text))) => edit_text(terminal, app, field, &text),
+                (None, Some((field, text, line))) => edit_text(terminal, app, field, &text, line),
                 (None, None) => Ok(()),
             };
             events = EventStream::new();

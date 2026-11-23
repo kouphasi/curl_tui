@@ -13,4 +13,5 @@ pub mod kitty;
 pub mod model;
 pub mod preview;
 pub mod ui;
+pub mod validate;
 pub mod vimrc;
